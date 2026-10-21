@@ -181,3 +181,44 @@ test('sin conversación que bifurcar, contesta el modelo elegido', async ($, on)
   expect(await ui.find({ type: 'Markdown', text: /Hola desde QA/ })).toBeDefined()
   await ui.unmount()
 })
+
+test('los agentes se escriben en el chat de grupo', async ($, on) => {
+  const prompts: string[] = []
+  const usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
+  mock.store(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('model.fork', (_, e) => {
+    prompts.push(e.prompt)
+    const text = e.prompt.includes('agente Diseño UX/UI del')
+      ? 'Claro, le pregunto.\nAL GRUPO: @po ¿qué priorizamos?'
+      : e.prompt.includes('agente Product Owner del')
+        ? 'Primero el bloque 2.'
+        : e.prompt.includes('agente QA del')
+          ? '@dev ¿ya está?'
+          : '@qa Casi, ¿y tú?'
+    return { value: { isAnswered: true as const, text, usage } }
+  })
+
+  // Asked in its own chat, the designer writes to the PO in the group.
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'chat-ux-ui-designer' })
+  await ui.input({ key: 'entrada-ux-ui-designer-0', text: 'Habla con el PO' })
+  expect(prompts[0]).toContain('«AL GRUPO:»')
+  expect(await ui.find({ type: 'Markdown', text: /Le escribí al chat de grupo: «@po ¿qué priorizamos\?»/ })).toBeDefined()
+  expect(await ui.find({ type: 'Markdown', text: /^AL GRUPO/ })).toBeUndefined()
+  expect(prompts.length).toBe(2)
+  expect(prompts[1]).toContain('Mensaje nuevo del agente Diseño UX/UI')
+  expect(prompts[1]).not.toContain('PASO')
+
+  await ui.press({ key: 'volver' })
+  await ui.press({ key: 'chat-grupo' })
+  expect(await ui.find({ type: 'Markdown', text: /^@po ¿qué priorizamos\?$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Markdown', text: /Primero el bloque 2/ })).toBeDefined()
+
+  // Agents who keep naming each other stop after a few hops.
+  await ui.input({ key: 'entrada-grupo-2', text: '@qa ¿cómo vas?' })
+  expect(prompts.length).toBe(6)
+  expect(prompts[3]).toContain('Mensaje nuevo del agente QA')
+  expect(prompts[5]).toContain('No nombres a otros agentes')
+  await ui.unmount()
+})
