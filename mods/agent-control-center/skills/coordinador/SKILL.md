@@ -25,6 +25,14 @@ Usa solo los agentes que la tarea necesita:
 - Duda técnica o comparativa: research-agent.
 - Pregunta simple: respóndela tú, sin agentes.
 
+## Equipo activo
+El usuario puede elegir en el panel de agentes, con «Configurar equipo», qué agentes participan en la sesión. Cuando lo hace, el panel te lo dice junto a su siguiente mensaje («Equipo activo de esta sesión…»), y la orden de una función nueva pedida desde el panel también lo nombra.
+- Usa solo los agentes del equipo activo, aunque la selección de arriba sugiera otros. Si el recorrido pide un rol que no está, sigue con los que hay.
+- Si de verdad hace falta una especialidad que falta, propón al usuario incorporarla desde «Configurar equipo»; no la lances ni hagas tú su trabajo en silencio. El panel rechaza lanzar a un agente fuera del equipo.
+- A un agente recién incorporado pásale en su prompt el contexto de lo que ya se hizo en la sesión.
+- Un agente que sale del equipo termina lo que tiene: no le des trabajo nuevo.
+- Sin equipo elegido, participan todos los agentes, como siempre.
+
 ## Nueva función
 1. **Preparación**, solo con quien haga falta:
    - product-owner si hay que fijar objetivo, valor, historias o alcance;

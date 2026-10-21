@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, TurnStepInput } from 'claude-code'
 
-import type { AgentRun, ChatMessage, RunStatus, TeamFilter } from '../types'
+import type { AgentRun, ChatMessage, RunStatus, SessionTeam, TeamFilter } from '../types'
 
 const PANE = 'panel-agentes'
 const TITLE = 'Agentes'
@@ -25,6 +25,9 @@ const paused = atom({ plugin: 'panel-agentes', key: 'paused' } as const, [])
 const earlier = atom({ plugin: 'panel-agentes', key: 'earlier' } as const, false)
 const requests = atom({ plugin: 'panel-agentes', key: 'requests' } as const, [])
 const notice = atom({ plugin: 'panel-agentes', key: 'notice' } as const, null)
+const crewAtom = atom({ plugin: 'panel-agentes', key: 'team' } as const, { roles: [], leaving: [], joined: {}, isChosen: false })
+const setup = atom({ plugin: 'panel-agentes', key: 'setup' } as const, null)
+const offer = atom({ plugin: 'panel-agentes', key: 'offer' } as const, null)
 
 // The team in the order the coordinador skill hands work along, with the
 // short names an @mention in the group chat may use.
@@ -62,6 +65,134 @@ const labelOf = (role: string) =>
     : role === COORD
       ? 'Coordinador'
       : (TEAM.find(one => one.role === role)?.label ?? FORMER[role] ?? role)
+
+// The team a session works with. Until the person chooses one, every role
+// takes part, as before; once chosen, only those roles are consulted in the
+// chats and launched for new work from this session. It lives in the
+// session's state, so each session has its own. A role taken off keeps its
+// runs, chats and reports, and one taken off while working finishes what it
+// has.
+const ROLES = TEAM.map(one => one.role)
+const NO_TEAM: SessionTeam = { roles: ROLES, leaving: [], joined: {}, isChosen: false }
+
+const teamOf = async ($: EngineInterface): Promise<SessionTeam> => {
+  const team = await read($, crewAtom)
+  return team.isChosen ? team : { ...NO_TEAM, told: team.told }
+}
+
+const setTeam = async ($: EngineInterface, change: (team: SessionTeam) => SessionTeam) =>
+  update($, crewAtom, team => change(team.isChosen ? team : NO_TEAM))
+
+const names = (roles: string[]) => {
+  const labels = roles.map(labelOf)
+  return labels.length < 2 ? (labels[0] ?? 'nadie') : `${labels.slice(0, -1).join(', ')} y ${labels.at(-1)}`
+}
+
+const isBusy = (list: AgentRun[], role: string) => list.some(one => one.role === role && one.status === 'trabajando')
+
+// In the team order, whatever order they were picked in.
+const ordered = (roles: string[]) => ROLES.filter(role => roles.includes(role))
+
+const isOut = (team: SessionTeam, role: string) => team.isChosen && ROLES.includes(role) && !team.roles.includes(role)
+
+// The team as the agents and the Coordinador are told it.
+const teamLine = (team: SessionTeam) =>
+  team.isChosen
+    ? `Equipo activo de esta sesión, elegido por el usuario: ${team.roles.length > 0 ? names(team.roles) : 'ninguno'}. Solo cuentas con ellos.`
+    : ''
+
+const note = (channel: string, text: string): ChatMessage => ({
+  id: crypto.randomUUID(),
+  channel,
+  from: NOTE,
+  text,
+  isNote: true as const,
+})
+
+const noteGroup = ($: EngineInterface, text: string) => update($, chat, all => [...all, note(GROUP, text)])
+
+// Choosing the team. Roles brought in later are marked, so their first
+// answers come with what the session already holds; roles taken off while
+// working stay until they finish.
+const applyTeam = async ($: EngineInterface, draft: string[], leave: string[]) => {
+  const before = await teamOf($)
+  const roles = ordered(draft)
+  const added = before.isChosen ? roles.filter(role => !before.roles.includes(role)) : []
+  const removed = before.roles.filter(role => !roles.includes(role))
+  const at = Date.now()
+  await setTeam($, team => ({
+    ...team,
+    roles,
+    leaving: ordered([...team.leaving, ...leave].filter(role => !roles.includes(role))),
+    joined: { ...team.joined, ...Object.fromEntries(added.map(role => [role, at])) },
+    isChosen: true,
+  }))
+  if (!before.isChosen) {
+    await noteGroup($, roles.length > 0 ? `Equipo de esta sesión: ${names(roles)}.` : 'El equipo de esta sesión está vacío.')
+  } else {
+    if (added.length > 0) await noteGroup($, `${names(added)} ${added.length === 1 ? 'se incorporó' : 'se incorporaron'} al equipo.`)
+    const gone = removed.filter(role => !leave.includes(role))
+    const going = removed.filter(role => leave.includes(role))
+    if (gone.length > 0) await noteGroup($, `${names(gone)} ${gone.length === 1 ? 'salió' : 'salieron'} del equipo.`)
+    if (going.length > 0) await noteGroup($, `${names(going)} ${going.length === 1 ? 'sale' : 'salen'} del equipo al terminar su tarea.`)
+  }
+  await update($, offer, now => (now && now.roles.every(role => roles.includes(role)) ? null : now))
+}
+
+const bringIn = async ($: EngineInterface, roles: string[]) => {
+  const team = await teamOf($)
+  await applyTeam($, [...team.roles, ...roles], team.leaving.filter(role => !roles.includes(role)))
+}
+
+// Confirming «Configurar equipo»: roles taken off while working are asked
+// about first, to keep them or let them go once they finish. No task is cut.
+const confirmTeam = async ($: EngineInterface) => {
+  const now = await read($, setup)
+  if (now === null) return
+  const team = await teamOf($)
+  const list = await read($, runs)
+  const busy = team.roles.filter(role => !now.draft.includes(role) && isBusy(list, role))
+  if (busy.length > 0) {
+    await update($, setup, () => ({ ...now, busy }))
+    return
+  }
+  await applyTeam($, now.draft, [])
+  await update($, setup, () => null)
+}
+
+const settleBusy = async ($: EngineInterface, keep: boolean) => {
+  const now = await read($, setup)
+  if (now === null) return
+  const busy = now.busy ?? []
+  await applyTeam($, keep ? [...now.draft, ...busy] : now.draft, keep ? [] : busy)
+  await update($, setup, () => null)
+}
+
+// Roles out of the team never get a message on their own: the person is
+// offered to bring them in first, and they get it once in.
+const propose = ($: EngineInterface, channel: string, roles: string[], messageId?: string) =>
+  update($, offer, () => ({ channel, roles, messageId }))
+
+const accept = async ($: EngineInterface) => {
+  const now = await read($, offer)
+  if (now === null) return
+  await update($, offer, () => null)
+  await bringIn($, now.roles)
+  if (now.messageId === undefined) return
+  const message = (await read($, chat)).find(one => one.id === now.messageId)
+  if (message === undefined) return
+  const turns = now.roles.map(role => ({ role, mustAnswer: true }))
+  await ask($, now.channel, turns, message, message.from === ME ? 0 : 1, { left: RELAYS })
+}
+
+const decline = async ($: EngineInterface) => {
+  const now = await read($, offer)
+  if (now === null) return
+  await update($, offer, () => null)
+  const one = now.roles.length === 1
+  const text = `${names(now.roles)} ${one ? 'sigue' : 'siguen'} fuera del equipo${now.messageId ? `: no ${one ? 'le' : 'les'} llegó el mensaje` : ''}.`
+  await update($, chat, all => [...all, note(now.channel, text)])
+}
 
 const ICON: Record<RunStatus, string> = {
   trabajando: '●',
@@ -318,13 +449,28 @@ const isQuestion = (text: string) => /[?¿]/.test(text)
 const roleNamed = (word: string) =>
   TEAM.find(one => one.role === word || one.aliases.includes(word))?.role
 
+const wordsOf = (text: string) => [...text.toLowerCase().matchAll(/@([\p{L}/-]+)/gu)].map(m => m[1] ?? '')
+
+const rolesFor = (word: string) => TEAM.filter(one => word === one.role || one.aliases.includes(word)).map(one => one.role)
+
 // The roles a group message names with @, or every role when it names none.
 const addressed = (text: string) => {
-  const words = [...text.toLowerCase().matchAll(/@([\p{L}/-]+)/gu)].map(m => m[1] ?? '')
+  const words = wordsOf(text)
   const named = TEAM.filter(one =>
     words.some(word => word === one.role || one.aliases.includes(word)),
   ).map(one => one.role)
   return { roles: named.length > 0 ? named : TEAM.map(one => one.role), isNamed: named.length > 0 }
+}
+
+// The roles named that are out of the team. A name several roles share
+// (@dev) reaches those in the team, and offers the others only when none is.
+const absentOf = (text: string, team: SessionTeam) => {
+  if (!team.isChosen) return []
+  const out = wordsOf(text).flatMap(word => {
+    const roles = rolesFor(word)
+    return roles.some(role => team.roles.includes(role)) ? [] : roles
+  })
+  return ordered(out)
 }
 
 // The pick's lines, «@alias: what to bring», in the order written.
@@ -353,18 +499,26 @@ const kindOf = (text: string): Kind => {
 // stands, unless the person asked something; a pick that fails or names no
 // one usable still leaves one role to consult, the Product Owner, asked to
 // answer or to ask what is missing.
-const pick = async (
-  $: EngineInterface,
-  history: ChatMessage[],
-  text: string,
-): Promise<{ kind: Kind; turns: Turn[] }> => {
-  const team = TEAM.map(one => `@${one.aliases[0]}: ${one.label}, ${one.job}`).join('\n')
+//
+// Only the session's team is picked from. A specialty the message needs and
+// the team lacks comes back as missing, for the Coordinador to propose; with
+// no one to consult, the Coordinador answers alone.
+type Pick = { kind: Kind; turns: Turn[]; missing: string[]; isAlone?: true }
+
+const pick = async ($: EngineInterface, history: ChatMessage[], text: string, crew: SessionTeam): Promise<Pick> => {
+  const members = TEAM.filter(one => crew.roles.includes(one.role))
+  const absent = crew.isChosen ? TEAM.filter(one => !crew.roles.includes(one.role)) : []
+  const team =
+    members.length > 0
+      ? members.map(one => `@${one.aliases[0]}: ${one.label}, ${one.job}`).join('\n')
+      : 'Nadie: el usuario no eligió ningún agente para esta sesión.'
   const prompt = [
     'Clasificas los mensajes del chat de grupo de un equipo de agentes de software y decides a quién consulta el Coordinador. Cada consulta cuesta: elige por la aportación concreta que necesita el mensaje, no solo por la especialidad.',
     `El equipo:\n${team}`,
-    history.length > 0
-      ? `Chat hasta ahora (fíjate en lo que sigue pendiente: preguntas sin contestar, decisiones a medias):\n\n${transcript(history, PICK_CHARS)}`
+    absent.length > 0
+      ? `Fuera del equipo de esta sesión, porque el usuario los dejó fuera (nunca los elijas): ${absent.map(one => `@${one.aliases[0]} (${one.label})`).join(', ')}. Si el mensaje necesita de verdad una de esas especialidades y nadie del equipo la cubre, añade al final una línea «FUERA: @alias»: el Coordinador propondrá incorporarla.`
       : '',
+    titled('Chat hasta ahora (fíjate en lo que sigue pendiente: preguntas sin contestar, decisiones a medias):', history, PICK_CHARS),
     `Mensaje nuevo del usuario:\n\n${text}`,
     [
       'Primero, qué es el mensaje: «TIPO: estado» si pregunta cómo va un trabajo, qué falta o si algo está hecho; «TIPO: funcion» si pide construir, añadir o cambiar una funcionalidad del producto; «TIPO: otro» para todo lo demás (preguntas, opiniones, decisiones, saludos).',
@@ -384,14 +538,24 @@ const pick = async (
     .catch(() => ({ isAnswered: false as const }))
   const answer = reply.isAnswered ? reply.text.trim() : ''
   const kind = kindOf(answer)
-  const said = answer.replace(/^.*TIPO:.*$/im, '').trim()
-  const turns = turnsOf(said).slice(0, PICKED)
-  if (kind !== 'otro' || turns.length > 0) return { kind, turns }
+  const outside = /^.*FUERA:(.*)$/im.exec(answer)?.[1] ?? ''
+  const said = answer.replace(/^.*TIPO:.*$/im, '').replace(/^.*FUERA:.*$/im, '').trim()
+  const named = turnsOf(said)
+  const turns = named
+    .filter(turn => crew.roles.includes(turn.role))
+    .slice(0, PICKED)
+    .map((turn, at) => ({ ...turn, mustAnswer: at === 0 }))
+  const missing =
+    kind === 'otro' ? ordered([...turnsOf(outside), ...named].map(turn => turn.role).filter(role => isOut(crew, role))) : []
+  if (kind !== 'otro' || turns.length > 0 || missing.length > 0) return { kind, turns, missing }
   const isNobody = said.replace(/[\s.*_]/g, '').toUpperCase() === NOBODY
-  if (isNobody && !isQuestion(text)) return { kind, turns: [] }
+  if (isNobody && !isQuestion(text)) return { kind, turns: [], missing }
+  const fallback = crew.roles.includes('product-owner') ? 'product-owner' : crew.roles[0]
+  if (fallback === undefined) return { kind, turns: [], missing, isAlone: true }
   return {
     kind,
-    turns: [{ role: 'product-owner', aim: 'contestar al usuario o pedirle la aclaración que haga falta', mustAnswer: true }],
+    turns: [{ role: fallback, aim: 'contestar al usuario o pedirle la aclaración que haga falta', mustAnswer: true }],
+    missing,
   }
 }
 
@@ -410,6 +574,12 @@ const transcript = (messages: ChatMessage[], max = HISTORY_CHARS) => {
   return lines.map(one => one.text).join('\n\n')
 }
 
+// A chat under its heading, or nothing when it holds no lines yet.
+const titled = (heading: string, messages: ChatMessage[], max = HISTORY_CHARS) => {
+  const text = transcript(messages, max)
+  return text === '' ? '' : `${heading}\n\n${text}`
+}
+
 // What the panel knows of a role's own work this session.
 const workOf = (role: string, list: AgentRun[]) => {
   const mine = list.filter(one => one.role === role)
@@ -425,6 +595,15 @@ const workOf = (role: string, list: AgentRun[]) => {
       return `- Tarea «${run.task}»: ${state}.${summary}`
     })
     .join('\n')
+}
+
+// What a role brought in partway through gets to catch up: what the others
+// delivered this session. The chats it reads give the rest.
+const catchUpOf = (role: string, list: AgentRun[]) => {
+  const done = list.filter(one => one.role !== role && one.status === 'entregado').slice(-6)
+  return done.length === 0
+    ? 'Todavía nadie del equipo ha entregado nada en esta sesión.'
+    : done.map(run => `- ${labelOf(run.role)}, tarea «${run.task}»: ${summaryOf(run.report)}`).join('\n')
 }
 
 // Agents reach each other through the group chat. In its own chat a role
@@ -467,18 +646,25 @@ type Prompt = {
   work: string
   /** Asked by the Coordinador, who answers the person with what it gathers. */
   isConsulted?: boolean
+  /** The session's team: the only agents it may name. */
+  members: string[]
+  /** For a role brought in partway through: what the others delivered. */
+  catchUp?: string
 }
 
-const chatPrompt = ({ role, channel, group, before, message, since, turn, canReach, work, isConsulted }: Prompt) => {
+const chatPrompt = ({ role, channel, group, before, message, since, turn, canReach, work, isConsulted, members, catchUp }: Prompt) => {
   const isGroup = channel === GROUP
   const member = TEAM.find(one => one.role === role)
-  const team = TEAM.map(one => `${one.label} (@${one.aliases[0]})`).join(', ')
+  const team = TEAM.filter(one => members.includes(one.role) || one.role === role)
+    .map(one => `${one.label} (@${one.aliases[0]})`)
+    .join(', ')
   const writer = message.from === ME ? 'del usuario' : `del agente ${labelOf(message.from)}`
   const reach = !canReach
     ? 'No nombres a otros agentes con @ en esta respuesta.'
     : isGroup
       ? 'Nombra con @ a otro agente solo para resolver una dependencia concreta: una pregunta que solo ese rol puede contestar y sin cuya respuesta no puedes seguir; hazla concreta. Nunca para pedir que confirme, para agradecer o de pasada. Si te escribe otro agente, contesta lo que te pide sin devolverle la pregunta.'
       : `Si el usuario te pide hablar con otro agente, o necesitas algo concreto de otro para seguir, añade al final una línea que empiece por «AL GRUPO:» con el mensaje para el chat de grupo, nombrando con @ a quien va dirigido. El equipo: ${team}. Ese agente te contestará en el chat de grupo.`
+  const reachAll = canReach && members.length < ROLES.length ? `${reach} Solo puedes nombrar a agentes del equipo de esta sesión.` : reach
   const pass = turn.mustAnswer
     ? ''
     : message.from === ME
@@ -487,23 +673,24 @@ const chatPrompt = ({ role, channel, group, before, message, since, turn, canRea
   return [
     `A partir de aquí no eres el asistente principal: eres el agente ${labelOf(role)} del Agent Control Center, que se ocupa de ${member?.job ?? 'su rol'}.`,
     isConsulted
-      ? 'El Coordinador te consulta por un mensaje del usuario en el chat de grupo del panel de agentes, y le contestará con lo que reúna: dale solo tu aportación, sin dirigirte al usuario ni saludar.'
+      ? `El Coordinador te consulta por un mensaje del usuario en el chat de grupo del panel de agentes, y le contestará con lo que reúna: dale solo tu aportación, sin dirigirte al usuario ni saludar. El equipo: ${team}.`
       : isGroup
         ? `Estás en el chat de grupo del panel de agentes, con el usuario y todo el equipo: ${team}.`
         : 'Estás en tu chat con el usuario en el panel de agentes.',
     `Lo que has hecho en esta sesión:\n${work}`,
+    catchUp
+      ? `Te incorporaste al equipo con la sesión ya empezada. Lo que entregaron los demás, para ponerte al día (el chat de abajo tiene lo hablado):\n${catchUp}`
+      : '',
     VOICE,
     isGroup
       ? 'Aporta solo lo nuevo: una respuesta pendiente, una decisión, evidencia, un riesgo concreto, una pregunta necesaria o un avance verificado. Repetir o reformular lo que ya se dijo no cuenta. Ante una decisión del usuario, reconócela en una frase y añade solo lo que cambia o el siguiente paso; no rehagas entregables en el chat.'
       : '',
     TRUTH,
-    reach,
+    reachAll,
     turn.aim ? `Lo que se espera de ti en este mensaje (una aportación de chat, no un entregable): ${turn.aim}.` : '',
     pass,
-    group.length > 0
-      ? `Lo último del chat de grupo, donde el usuario también decide cosas con el equipo:\n\n${transcript(group, GROUP_CHARS)}`
-      : '',
-    before.length > 0 ? `Chat hasta ahora:\n\n${transcript(before)}` : '',
+    titled('Lo último del chat de grupo, donde el usuario también decide cosas con el equipo:', group, GROUP_CHARS),
+    titled('Chat hasta ahora:', before),
     `Mensaje nuevo ${writer}:\n\n${message.text}`,
     since.length > 0
       ? `Lo que ya se respondió a este mensaje:\n\n${transcript(since)}\n\nNo lo repitas ni lo reformules: añade solo lo que falte.`
@@ -543,9 +730,12 @@ const send = async ($: EngineInterface, channel: string, text: string) => {
   await follow($, channel)
   const named = channel === GROUP ? addressed(said) : { roles: [channel], isNamed: true }
   if (!named.isNamed) return coordinate($, channel, history, message)
-  // Whoever the person names must answer.
-  const turns = named.roles.map(role => ({ role, mustAnswer: true }))
-  await ask($, channel, turns, message, 0, { left: RELAYS })
+  const team = await teamOf($)
+  const absent = channel === GROUP ? absentOf(said, team) : isOut(team, channel) ? [channel] : []
+  if (absent.length > 0) await propose($, channel, absent, message.id)
+  // Whoever the person names in the team must answer.
+  const turns = named.roles.filter(role => !isOut(team, role)).map(role => ({ role, mustAnswer: true }))
+  if (turns.length > 0) await ask($, channel, turns, message, 0, { left: RELAYS })
 }
 
 // The Coordinador's answer to a group message that names no one. Asking how
@@ -556,13 +746,16 @@ const coordinate = async ($: EngineInterface, channel: string, history: ChatMess
   const id = crypto.randomUUID()
   await update($, chat, all => [...all, { id, channel, from: COORD, text: '', isPending: true }])
   await follow($, channel)
-  const { kind, turns } = await pick($, history, message.text)
+  const team = await teamOf($)
+  const picked = await pick($, history, message.text, team)
+  const { kind, missing } = picked
   const text =
     kind === 'estado'
-      ? await report($, history, message)
+      ? await report($, history, message, team)
       : kind === 'funcion'
-        ? await handOff($, message.text)
-        : await gather($, history, message, turns)
+        ? await handOff($, message.text, team)
+        : await gather($, history, message, picked, team)
+  if (missing.length > 0) await propose($, channel, missing)
   await update($, chat, all =>
     all.flatMap(one => {
       if (one.id !== id) return [one]
@@ -643,10 +836,11 @@ const facts = async ($: EngineInterface) => {
   return lines.join('\n')
 }
 
-const report = async ($: EngineInterface, history: ChatMessage[], message: ChatMessage) => {
+const report = async ($: EngineInterface, history: ChatMessage[], message: ChatMessage, team: SessionTeam) => {
   const known = await facts($)
   const prompt = [
     `${COORD_ROLE} Ahora el usuario pregunta cómo va el trabajo. Solo informas: no lanzas agentes, no retomas tareas y no prometes trabajo.`,
+    teamLine(team),
     `Datos que el panel acaba de comprobar:\n${known}`,
     'También ves la conversación principal con Claude: úsala para saber qué se pidió y a quién, y di cuándo algo viene de ahí y no de los datos del panel.',
     [
@@ -658,7 +852,7 @@ const report = async ($: EngineInterface, history: ChatMessage[], message: ChatM
     ].join('\n'),
     VOICE,
     TRUTH,
-    history.length > 0 ? `Chat hasta ahora:\n\n${transcript(history)}` : '',
+    titled('Chat hasta ahora:', history),
     `Pregunta del usuario:\n\n${message.text}`,
   ]
     .filter(Boolean)
@@ -670,19 +864,37 @@ const report = async ($: EngineInterface, history: ChatMessage[], message: ChatM
 // coordinador skill and launches each agent for real. The panel leaves the
 // order in the prompt box: the person's own Enter sends it, so it runs as
 // their request, with the permissions they already have.
-const handOff = async ($: EngineInterface, goal: string) => {
+//
+// With a team chosen, the order names it: the flow runs with those agents
+// only, and a specialty missing is proposed to the person, not launched.
+const handOff = async ($: EngineInterface, goal: string, team: SessionTeam) => {
+  if (team.isChosen && team.roles.length === 0) {
+    return 'No hay ningún agente en el equipo de esta sesión, así que nadie puede trabajar en esto. Configura el equipo desde el panel y vuelve a pedírmelo.'
+  }
   await update($, requests, list => [...list, { id: crypto.randomUUID(), goal, at: Date.now() }].slice(-10))
-  const order = `${SKILL} ${FROM_PANEL}: «${goal}». Sigue el recorrido «Nueva función» de la skill.`
+  const crew = team.isChosen
+    ? ` Equipo activo de esta sesión: ${names(team.roles)}. Usa solo esos agentes; si hace falta otra especialidad, propónmela sin lanzarla.`
+    : ''
+  const order = `${SKILL} ${FROM_PANEL}: «${goal}».${crew} Sigue el recorrido «Nueva función» de la skill.`
   const filled = await $.prompt.fill({ text: order }).catch(() => ({ isFilled: false }))
+  const start = team.isChosen
+    ? `empiezo con el equipo de esta sesión (${names(team.roles)}), en el orden del flujo`
+    : 'empiezo con Product Owner, análisis de negocio y QA, según haga falta, para tener historias, requisitos y criterios de aceptación. Después pasa a desarrollo y a pruebas'
   return filled.isFilled
-    ? 'Lo llevo al flujo del equipo. Te dejé la orden en la caja del chat principal: envíala con Enter y empiezo con Product Owner, análisis de negocio y QA, según haga falta, para tener historias, requisitos y criterios de aceptación. Después pasa a desarrollo y a pruebas. Verás a cada agente en su tarjeta, y aquí puedes preguntarme «¿cómo va?».'
+    ? `Lo llevo al flujo del equipo. Te dejé la orden en la caja del chat principal: envíala con Enter y ${start}. Verás a cada agente en su tarjeta, y aquí puedes preguntarme «¿cómo va?».`
     : `Lo llevo al flujo del equipo, pero no pude dejar la orden en la caja del chat principal. Envíala tú allí:\n\n\`\`\`\n${order}\n\`\`\``
 }
 
 // Anything else: the agents picked answer the Coordinador in turn, each
 // seeing what the one before said, and it answers the person once.
-const gather = async ($: EngineInterface, history: ChatMessage[], message: ChatMessage, turns: Turn[]) => {
-  if (turns.length === 0) return null
+const gather = async (
+  $: EngineInterface,
+  history: ChatMessage[],
+  message: ChatMessage,
+  { turns, missing, isAlone }: Pick,
+  team: SessionTeam,
+) => {
+  if (turns.length === 0 && missing.length === 0 && !isAlone) return null
   const list = await read($, runs)
   const heard: ChatMessage[] = []
   for (const turn of turns) {
@@ -697,6 +909,8 @@ const gather = async ($: EngineInterface, history: ChatMessage[], message: ChatM
       canReach: false,
       work: workOf(turn.role, list),
       isConsulted: true,
+      members: team.roles,
+      catchUp: team.joined[turn.role] !== undefined ? catchUpOf(turn.role, list) : undefined,
     })
     const reply = await answerAs($, turn.role, prompt).catch(() => ({ isAnswered: false as const }))
     const text = reply.isAnswered ? reply.text.trim() : ''
@@ -705,9 +919,18 @@ const gather = async ($: EngineInterface, history: ChatMessage[], message: ChatM
   const asked = turns.map(turn => labelOf(turn.role)).join(' y ')
   const prompt = [
     `${COORD_ROLE} Consultas solo a quien hace falta y contestas tú, con una sola respuesta.`,
-    heard.length > 0
-      ? `Por este mensaje consultaste a ${asked}. Sus aportaciones:\n\n${transcript(heard)}`
-      : `Por este mensaje consultaste a ${asked}, y nadie tenía nada nuevo que aportar.`,
+    teamLine(team),
+    turns.length === 0
+      ? 'Por este mensaje no consultaste a ningún agente.'
+      : heard.length > 0
+        ? `Por este mensaje consultaste a ${asked}. Sus aportaciones:\n\n${transcript(heard)}`
+        : `Por este mensaje consultaste a ${asked}, y nadie tenía nada nuevo que aportar.`,
+    missing.length > 0
+      ? `Para este mensaje haría falta ${names(missing)}, que no está en el equipo activo. No ${missing.length === 1 ? 'lo' : 'los'} consultes ni hables en su nombre: propón al usuario ${missing.length === 1 ? 'incorporarlo' : 'incorporarlos'}, en una frase; el panel le muestra debajo el botón para hacerlo.`
+      : '',
+    team.isChosen && team.roles.length === 0
+      ? 'Como el equipo está vacío, dile también que puede elegir agentes con «Configurar equipo».'
+      : '',
     [
       'Cómo respondes:',
       '- Reúne las aportaciones en una respuesta clara y natural, más corta que lo que te dieron: quédate con lo esencial, sin repetir ideas ni añadir lo que no dijeron, y ofrece el detalle si lo quiere. Nombra a un rol solo cuando ayude, por ejemplo para atribuir un riesgo o una decisión.',
@@ -715,7 +938,7 @@ const gather = async ($: EngineInterface, history: ChatMessage[], message: ChatM
     ].join('\n'),
     VOICE,
     TRUTH,
-    history.length > 0 ? `Chat hasta ahora:\n\n${transcript(history)}` : '',
+    titled('Chat hasta ahora:', history),
     `Mensaje nuevo del usuario:\n\n${message.text}`,
   ]
     .filter(Boolean)
@@ -768,8 +991,11 @@ const answer = async (
   await update($, chat, all => [...all, { id, channel, from: role, text: '', isPending: true }])
   await follow($, channel)
 
-  const work = workOf(role, await read($, runs))
-  const prompt = chatPrompt({ role, channel, group, before, message, since, turn, canReach, work })
+  const list = await read($, runs)
+  const team = await teamOf($)
+  const work = workOf(role, list)
+  const catchUp = team.joined[role] !== undefined ? catchUpOf(role, list) : undefined
+  const prompt = chatPrompt({ role, channel, group, before, message, since, turn, canReach, work, members: team.roles, catchUp })
   const reply = await answerAs($, role, prompt).catch((error: unknown) => ({
     isAnswered: false as const,
     reason: String(error),
@@ -798,14 +1024,20 @@ const answer = async (
   if (toGroup !== '') {
     const posted: ChatMessage = { id: crypto.randomUUID(), channel: GROUP, from: role, text: toGroup }
     await update($, chat, all => [...all, posted])
-    const targets = take(reached(toGroup, role), budget)
-    if (targets.length > 0) await ask($, GROUP, targets, posted, hop + 1, budget)
+    await relay($, posted, hop, budget)
     return
   }
-  if (channel === GROUP) {
-    const targets = take(reached(text, role), budget)
-    if (targets.length > 0) await ask($, GROUP, targets, { id, channel, from: role, text }, hop + 1, budget)
-  }
+  if (channel === GROUP) await relay($, { id, channel, from: role, text }, hop, budget)
+}
+
+// What an agent says to others in the group reaches those in the team; one
+// named out of it is offered to the person instead.
+const relay = async ($: EngineInterface, posted: ChatMessage, hop: number, budget: { left: number }) => {
+  const team = await teamOf($)
+  const absent = absentOf(posted.text, team).filter(role => role !== posted.from)
+  if (absent.length > 0) await propose($, GROUP, absent, posted.id)
+  const targets = take(reached(posted.text, posted.from).filter(role => !isOut(team, role)), budget)
+  if (targets.length > 0) await ask($, GROUP, targets, posted, hop + 1, budget)
 }
 
 export const register: Register = on => {
@@ -834,6 +1066,17 @@ export const register: Register = on => {
     if (isMember && isPaused(await read($, paused), role)) {
       return {
         deny: `El usuario puso en pausa a ${labelOf(role)} desde el panel de agentes. No lo lances hasta que lo reanude; si hace falta, pregúntale.`,
+      }
+    }
+    // New work only for the session's team; an agent already at work goes on.
+    if (isMember && e.resume === undefined) {
+      const team = await teamOf($)
+      if (isOut(team, role)) {
+        return {
+          deny: `${labelOf(role)} no está en el equipo de esta sesión, que el usuario eligió en el panel de agentes (${
+            team.roles.length > 0 ? `equipo activo: ${names(team.roles)}` : 'ahora no hay ningún agente'
+          }). No lo lances: si hace falta esa especialidad, propón al usuario incorporarla desde «Configurar equipo» en el panel.`,
+        }
       }
     }
     const models = isMember ? await readModels($) : {}
@@ -889,13 +1132,32 @@ export const register: Register = on => {
   })
 
   // The Coordinador's order, once the person sends it in the main session.
+  // The main session hears of the team when it changes, with the next prompt.
   on('prompt.submit', async ($, e, next) => {
     if (e.text.includes(FROM_PANEL)) {
       await update($, requests, list =>
         list.map((one, at) => (at === list.length - 1 && e.text.includes(one.goal) ? { ...one, isSent: true as const } : one)),
       )
     }
-    return next(e)
+    const team = await teamOf($)
+    const signature = `${team.roles.join(',')}|${team.leaving.join(',')}`
+    if (!team.isChosen || team.told === signature) return next(e)
+    const was = team.told?.split('|')[0]?.split(',').filter(Boolean)
+    const newcomers = was === undefined ? [] : team.roles.filter(role => !was.includes(role))
+    const line = [
+      `Equipo activo de esta sesión, elegido por el usuario en el panel de agentes: ${team.roles.length > 0 ? names(team.roles) : 'ninguno'}.`,
+      'Lanza solo a esos agentes del Agent Control Center. Si hace falta otra especialidad, propón al usuario incorporarla desde «Configurar equipo» en el panel; no la lances ni la actives tú.',
+      newcomers.length > 0
+        ? `${names(newcomers)} ${newcomers.length === 1 ? 'se acaba de incorporar' : 'se acaban de incorporar'}: al darle trabajo, pásale el contexto de lo que ya se hizo en la sesión.`
+        : '',
+      team.leaving.length > 0
+        ? `${names(team.leaving)} ${team.leaving.length === 1 ? 'sale' : 'salen'} del equipo: termina lo que tiene y no le des trabajo nuevo.`
+        : '',
+    ]
+      .filter(Boolean)
+      .join(' ')
+    await setTeam($, now => ({ ...now, told: signature }))
+    return next({ ...e, context: [...(e.context ?? []), line] })
   })
 
   on('turn.step', async function* ($, e, next) {
@@ -924,6 +1186,13 @@ export const register: Register = on => {
             : one,
         ),
       )
+      // One leaving the team goes once its work is done.
+      const role = (await read($, runs)).find(one => one.id === agentId)?.role
+      const team = await teamOf($)
+      if (role !== undefined && team.leaving.includes(role) && !isBusy(await read($, runs), role)) {
+        await setTeam($, now => ({ ...now, leaving: now.leaving.filter(one => one !== role) }))
+        await noteGroup($, `${labelOf(role)} terminó su tarea y salió del equipo.`)
+      }
     }
 
     return next(e)
@@ -976,6 +1245,7 @@ export const register: Register = on => {
       const isEarlier = await read($, earlier)
       const shownLines = isEarlier ? lines : lines.slice(-SHOWN)
       const hidden = lines.length - shownLines.length
+      const offered = await read($, offer)
       const room = isGroup
         ? 'Escribe al Coordinador, o nombra a un agente con @ (@po, @qa, @dev…)'
         : `Escribe a ${labelOf(showing)}`
@@ -1057,6 +1327,23 @@ export const register: Register = on => {
               {typing.join(', ')} {typing.length === 1 ? 'está' : 'están'} escribiendo…
             </Text>
           )}
+          {offered !== null && offered.channel === showing && (
+            <Box key="oferta" flexDirection="column" gap={1} borderStyle="round" borderColor="warning" paddingX={1}>
+              <Text>
+                {names(offered.roles)} no {offered.roles.length === 1 ? 'está' : 'están'} en el equipo de esta sesión. ¿
+                {offered.roles.length === 1 ? 'Lo' : 'Los'} incorporo
+                {offered.messageId ? ` y ${offered.roles.length === 1 ? 'le' : 'les'} paso el mensaje` : ''}?
+              </Text>
+              <Box flexDirection="row" flexWrap="wrap" gap={2}>
+                <Button key="incorporar" variant="primary" onPress={() => accept($)}>
+                  Incorporar
+                </Button>
+                <Button key="no-incorporar" plain onPress={() => decline($)}>
+                  <Text dimColor>Ahora no</Text>
+                </Button>
+              </Box>
+            </Box>
+          )}
           {Input ? (
             // The field takes the pane's whole width, two lines tall, with room
             // below so its focus ring is not cut off. Its key moves on with each
@@ -1090,6 +1377,106 @@ export const register: Register = on => {
     }
 
     const list = await read($, runs)
+    const team = await teamOf($)
+    const choosing = await read($, setup)
+
+    // «Configurar equipo»: a box per agent, kept apart from the team until
+    // confirmed, so cancelling leaves the team as it was.
+    if (choosing !== null) {
+      const draft = choosing.draft
+      const busy = choosing.busy ?? []
+      const toggle = (role: string) =>
+        update($, setup, now =>
+          now === null
+            ? now
+            : { draft: now.draft.includes(role) ? now.draft.filter(one => one !== role) : [...now.draft, role] },
+        )
+      return (
+        <Box flexDirection="column" gap={1}>
+          <Box flexDirection="row" gap={1} alignItems="center">
+            {icon('grupo', 18)}
+            <Text bold size="title">
+              Configurar equipo
+            </Text>
+          </Box>
+          <Text dimColor>
+            Elige qué agentes participan en esta sesión. Los que dejes fuera conservan su historial, sus chats y sus entregas.
+          </Text>
+          {TEAM.map(member => {
+            const isOn = draft.includes(member.role)
+            const isWorking = isBusy(list, member.role)
+            return (
+              <Box
+                key={`fila-${member.role}`}
+                flexDirection="row"
+                gap={1}
+                alignItems="center"
+                borderStyle="round"
+                borderColor={isOn ? TONE.accent : TONE.border}
+                backgroundColor={fill(isOn ? TONE.tabOn : TONE.card)}
+                paddingX={1}
+              >
+                <Button key={`casilla-${member.role}`} plain onPress={() => toggle(member.role)}>
+                  <Text color={isOn ? TONE.accent : undefined} dimColor={!isOn}>
+                    {isOn ? '☑' : '☐'}
+                  </Text>
+                </Button>
+                {tile(member.role, 16)}
+                <Box flexDirection="column" flexShrink={1} minWidth={0}>
+                  <Text bold wrap="truncate-end">
+                    {member.label}
+                    {isWorking ? <Text color="warning"> · trabajando</Text> : ''}
+                  </Text>
+                  <Text dimColor size="caption">
+                    {member.job.charAt(0).toUpperCase() + member.job.slice(1)}
+                  </Text>
+                </Box>
+              </Box>
+            )
+          })}
+          <Text dimColor size="caption">
+            {draft.length} de {TEAM.length} seleccionados
+          </Text>
+          {busy.length > 0 ? (
+            <Box key="ocupados" flexDirection="column" gap={1} borderStyle="round" borderColor="warning" paddingX={1}>
+              <Text>
+                {names(busy)} {busy.length === 1 ? 'está' : 'están'} trabajando ahora y su tarea no se cancela. ¿
+                {busy.length === 1 ? 'Lo' : 'Los'} mantengo en el equipo, o {busy.length === 1 ? 'sale' : 'salen'} cuando
+                {busy.length === 1 ? ' termine' : ' terminen'}?
+              </Text>
+              <Box flexDirection="row" flexWrap="wrap" gap={2}>
+                <Button key="mantener-ocupados" plain onPress={() => settleBusy($, true)}>
+                  <Text color={TONE.accent}>Mantener en el equipo</Text>
+                </Button>
+                <Button key="retirar-al-terminar" plain onPress={() => settleBusy($, false)}>
+                  <Text color={TONE.accent}>Retirar al terminar</Text>
+                </Button>
+                <Button key="cancelar-equipo" plain onPress={() => update($, setup, () => null)}>
+                  <Text dimColor>Cancelar</Text>
+                </Button>
+              </Box>
+            </Box>
+          ) : (
+            <Box flexDirection="row" gap={2} alignItems="center">
+              <Button key="confirmar-equipo" variant="primary" onPress={() => confirmTeam($)}>
+                Confirmar
+              </Button>
+              <Button key="cancelar-equipo" plain onPress={() => update($, setup, () => null)}>
+                <Text dimColor>Cancelar</Text>
+              </Button>
+            </Box>
+          )}
+        </Box>
+      )
+    }
+    const configure = async () => {
+      const now = await teamOf($)
+      await update($, setup, () => ({ draft: [...now.roles] }))
+    }
+    // The cards: the team, and those leaving it once they finish.
+    const crew = TEAM.filter(m => team.roles.includes(m.role) || team.leaving.includes(m.role))
+    const isEmpty = team.isChosen && crew.length === 0
+
     const open = await read($, expanded)
     const whole = await read($, full)
     const tab = await read($, filter)
@@ -1108,19 +1495,19 @@ export const register: Register = on => {
       return { mine, last: mine[mine.length - 1] }
     }
     const counts = {
-      'en-curso': TEAM.filter(m => stateOf(m.role).last?.status === 'trabajando').length,
-      completados: TEAM.filter(m => {
+      'en-curso': crew.filter(m => stateOf(m.role).last?.status === 'trabajando').length,
+      completados: crew.filter(m => {
         const status = stateOf(m.role).last?.status
         return status !== undefined && status !== 'trabajando'
       }).length,
-      disponibles: TEAM.filter(m => stateOf(m.role).last === undefined).length,
+      disponibles: crew.filter(m => stateOf(m.role).last === undefined).length,
     }
     // Working first, then finished, then free, as the team's order has them.
     const rank = (role: string) => {
       const status = stateOf(role).last?.status
       return status === 'trabajando' ? 0 : status !== undefined ? 1 : 2
     }
-    const shown = TEAM.filter(m => {
+    const shown = crew.filter(m => {
       const status = stateOf(m.role).last?.status
       if (tab === 'en-curso') return status === 'trabajando'
       if (tab === 'completados') return status !== undefined && status !== 'trabajando'
@@ -1166,6 +1553,7 @@ export const register: Register = on => {
       const ownEffort = efforts[member.role] ?? ''
       const took = !isWorking && last?.durationMs !== undefined ? duration(last.durationMs) : ''
       const doing = isWorking && last && !isHalted ? `${last.task}${last.lastTool ? ` · ${last.lastTool}` : ''}` : ''
+      const isLeaving = team.leaving.includes(member.role)
       return (
         <Box
           key={`tarjeta-${member.role}`}
@@ -1198,6 +1586,13 @@ export const register: Register = on => {
             <Box paddingLeft={5}>
               <Text dimColor size="caption" wrap="truncate-end">
                 {doing}
+              </Text>
+            </Box>
+          )}
+          {isLeaving && (
+            <Box paddingLeft={5}>
+              <Text color="warning" size="caption">
+                Se retira al terminar
               </Text>
             </Box>
           )}
@@ -1273,7 +1668,7 @@ export const register: Register = on => {
     const recent = isAll ? delivered : delivered.slice(0, 3)
 
     const tabs: { id: TeamFilter; label: string; count: number }[] = [
-      { id: 'todos', label: 'Todos', count: TEAM.length },
+      { id: 'todos', label: 'Todos', count: crew.length },
       { id: 'en-curso', label: 'En curso', count: counts['en-curso'] },
       { id: 'completados', label: 'Completados', count: counts.completados },
       { id: 'disponibles', label: 'Disponibles', count: counts.disponibles },
@@ -1287,12 +1682,22 @@ export const register: Register = on => {
             <Text bold size="title">
               Agentes
             </Text>
-            {badge(TEAM.length)}
+            {badge(team.roles.length)}
           </Box>
-          <Button key="chat-grupo" variant="primary" onPress={() => openChat($, GROUP)}>
-            Chat de grupo
-          </Button>
+          <Box flexDirection="row" gap={1} alignItems="center">
+            <Button key="configurar-equipo" plain onPress={configure}>
+              <Text dimColor>⚙ Configurar equipo</Text>
+            </Button>
+            <Button key="chat-grupo" variant="primary" onPress={() => openChat($, GROUP)}>
+              Chat de grupo
+            </Button>
+          </Box>
         </Box>
+        <Text dimColor size="caption">
+          {team.isChosen
+            ? `Equipo de esta sesión: ${team.roles.length} de ${TEAM.length} agentes`
+            : `Equipo de esta sesión: los ${TEAM.length} agentes (sin configurar)`}
+        </Text>
 
         <Box flexDirection="row" flexWrap="wrap" justifyContent="space-between" alignItems="center" gap={1}>
           <Box flexDirection="row" flexWrap="wrap" alignItems="center" gap={2}>
@@ -1328,6 +1733,15 @@ export const register: Register = on => {
 
         {coordinator}
 
+        {isEmpty ? (
+          <Box key="equipo-vacio" flexDirection="column" gap={1} borderStyle="round" borderColor={TONE.border} paddingX={1} paddingY={1}>
+            <Text>No hay agentes en el equipo de esta sesión.</Text>
+            <Text dimColor>El Coordinador no podrá consultar a nadie, ni Claude lanzar agentes, hasta que elijas alguno.</Text>
+            <Button key="configurar-equipo-vacio" variant="primary" onPress={configure}>
+              Configurar equipo
+            </Button>
+          </Box>
+        ) : (
         <Box flexDirection="column">
           <Box flexDirection="row" flexWrap="wrap" gap={1}>
             {tabs.map(one => {
@@ -1349,9 +1763,12 @@ export const register: Register = on => {
           <Text color={TONE.border}>{'─'.repeat(Math.max(10, width))}</Text>
         </Box>
 
-        <Box flexDirection="row" flexWrap="wrap" columnGap={1} rowGap={1}>
-          {cards.length > 0 ? cards : <Text dimColor>Ningún agente en esta pestaña.</Text>}
-        </Box>
+        )}
+        {!isEmpty && (
+          <Box flexDirection="row" flexWrap="wrap" columnGap={1} rowGap={1}>
+            {cards.length > 0 ? cards : <Text dimColor>Ningún agente en esta pestaña.</Text>}
+          </Box>
+        )}
 
         <Box flexDirection="row" justifyContent="space-between" alignItems="center" marginTop={1}>
           <Box flexDirection="row" gap={1} alignItems="center">

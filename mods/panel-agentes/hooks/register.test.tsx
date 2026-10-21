@@ -625,3 +625,262 @@ test('las tarjetas caben en un panel estrecho', async ($, on) => {
   // Wide: two a row, each wide enough for its name beside its status.
   expect(await at(80)).toMatchObject({ width: 39 })
 })
+
+test('configurar equipo: elegir, cancelar, quitar, incorporar, ocupados, vacío y reabrir', async ($, on) => {
+  const contexts: (readonly string[] | undefined)[] = []
+  let count = 0
+  mock.store(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('agent.spawn', (_, e) => ({ model: 'test', agentId: e.resume?.agentId ?? `a${++count}` }))
+  on('tool.call', () => ({ result: {} }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('prompt.submit', (_, e) => {
+    contexts.push(e.context)
+    return { text: e.text }
+  })
+  const spawn = (role: string, resume?: string) =>
+    $.agent.spawn({
+      tool_use_id: 't',
+      prompt: 'Trabaja',
+      description: `Tarea de ${role}`,
+      subagentType: `agent-control-center:${role}`,
+      provider: PROVIDER,
+      parentModel: 'test',
+      background: false,
+      fork: false,
+      ...(resume ? { resume: { agentId: resume } } : {}),
+    })
+  const submit = () => $.prompt.submit({ text: 'sigue', wait: false, origin: { kind: 'composer' } })
+  const toggle = async (ui: { press: (target: { key: string }) => Promise<unknown> }, roles: string[]) => {
+    for (const role of roles) await ui.press({ key: `casilla-${role}` })
+  }
+  const OTHERS = ['ux-ui-designer', 'backend-engineer', 'frontend-engineer', 'code-reviewer', 'devops-engineer', 'research-agent']
+
+  // With no team chosen, everyone takes part, as before.
+  let ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /los 9 agentes \(sin configurar\)/ })).toBeDefined()
+  expect(await ui.find({ key: 'tarjeta-devops-engineer' })).toBeDefined()
+  await submit()
+  expect(contexts.at(-1)).toBeUndefined()
+
+  // Cancelling leaves the team as it was.
+  await ui.press({ key: 'configurar-equipo' })
+  expect(await ui.find({ type: 'Text', text: /9 de 9 seleccionados/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Requisitos funcionales/ })).toBeDefined()
+  await toggle(ui, OTHERS)
+  expect(await ui.find({ type: 'Text', text: /3 de 9 seleccionados/ })).toBeDefined()
+  await ui.press({ key: 'cancelar-equipo' })
+  expect(await ui.find({ type: 'Text', text: /sin configurar/ })).toBeDefined()
+  expect(await ui.find({ key: 'tarjeta-devops-engineer' })).toBeDefined()
+
+  // A subset: only PO, BA and QA, as cards and for new work.
+  await ui.press({ key: 'configurar-equipo' })
+  await toggle(ui, OTHERS)
+  await ui.press({ key: 'confirmar-equipo' })
+  expect(await ui.find({ type: 'Text', text: /3 de 9 agentes/ })).toBeDefined()
+  expect(await ui.find({ key: 'tarjeta-qa-engineer' })).toBeDefined()
+  expect(await ui.find({ key: 'tarjeta-devops-engineer' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^Todos/ })).toBeDefined()
+  expect(await spawn('devops-engineer')).toMatchObject({ deny: expect.stringContaining('DevOps no está en el equipo de esta sesión') })
+  expect(await spawn('qa-engineer')).toMatchObject({ agentId: 'a1' })
+  // The main session hears of the team once, with its next prompt.
+  await submit()
+  expect(contexts.at(-1)?.join(' ')).toContain('Equipo activo de esta sesión, elegido por el usuario en el panel de agentes: Product Owner, Analista de negocio y QA.')
+  await submit()
+  expect(contexts.at(-1)).toBeUndefined()
+
+  // Reopening the panel keeps the team.
+  await ui.unmount()
+  ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /3 de 9 agentes/ })).toBeDefined()
+
+  // Taking off a working agent asks first, and never cuts its task.
+  await ui.press({ key: 'configurar-equipo' })
+  expect(await ui.find({ type: 'Text', text: /QA · trabajando/ })).toBeDefined()
+  await toggle(ui, ['qa-engineer'])
+  await ui.press({ key: 'confirmar-equipo' })
+  expect(await ui.find({ type: 'Text', text: /QA está trabajando ahora y su tarea no se cancela/ })).toBeDefined()
+  await ui.press({ key: 'retirar-al-terminar' })
+  expect(await ui.find({ type: 'Text', text: /Se retira al terminar/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /2 de 9 agentes/ })).toBeDefined()
+  const fromQa = { tool: 'Read', file_path: '/a.md', agentId: 'a1' } as const
+  expect(await $.tool.call(fromQa)).toMatchObject({ result: {} })
+  expect(await spawn('qa-engineer')).toMatchObject({ deny: expect.stringContaining('QA no está en el equipo') })
+  await submit()
+  expect(contexts.at(-1)?.join(' ')).toContain('QA sale del equipo: termina lo que tiene y no le des trabajo nuevo.')
+  await $.turn.complete({ answer: 'Plan listo.', durationMs: 1000, isAborted: false, turnId: 'u', agentId: 'a1', reason: 'answer' })
+  expect(await ui.find({ key: 'tarjeta-qa-engineer' })).toBeUndefined()
+  // Its delivery stays.
+  expect(await ui.find({ type: 'Text', text: /Tarea de qa-engineer/ })).toBeDefined()
+
+  // Bringing one in; or keeping a working one.
+  await spawn('product-owner')
+  await ui.press({ key: 'configurar-equipo' })
+  await toggle(ui, ['devops-engineer', 'product-owner'])
+  await ui.press({ key: 'confirmar-equipo' })
+  await ui.press({ key: 'mantener-ocupados' })
+  expect(await ui.find({ type: 'Text', text: /3 de 9 agentes/ })).toBeDefined()
+  expect(await ui.find({ key: 'tarjeta-product-owner' })).toBeDefined()
+  expect(await spawn('devops-engineer')).toMatchObject({ agentId: 'a3' })
+  await submit()
+  expect(contexts.at(-1)?.join(' ')).toContain('DevOps se acaba de incorporar')
+  await ui.press({ key: 'chat-grupo' })
+  expect(await ui.find({ type: 'Text', text: /Equipo de esta sesión: Product Owner, Analista de negocio y QA\./ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /QA sale del equipo al terminar su tarea\./ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /QA terminó su tarea y salió del equipo\./ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /DevOps se incorporó al equipo\./ })).toBeDefined()
+  await ui.press({ key: 'volver' })
+
+  // An empty team: nobody gets work, and the panel offers to configure.
+  await ui.press({ key: 'configurar-equipo' })
+  await toggle(ui, ['product-owner', 'business-analyst', 'devops-engineer'])
+  await ui.press({ key: 'confirmar-equipo' })
+  await ui.press({ key: 'retirar-al-terminar' })
+  await $.turn.complete({ answer: 'Hecho.', durationMs: 1000, isAborted: false, turnId: 'u', agentId: 'a2', reason: 'answer' })
+  await $.turn.complete({ answer: 'Hecho.', durationMs: 1000, isAborted: false, turnId: 'u', agentId: 'a3', reason: 'answer' })
+  expect(await ui.find({ type: 'Text', text: /No hay agentes en el equipo de esta sesión/ })).toBeDefined()
+  expect(await spawn('product-owner')).toMatchObject({ deny: expect.stringContaining('ahora no hay ningún agente') })
+  // A resumed agent finishes what it had, team or not.
+  expect(await spawn('devops-engineer', 'a3')).toMatchObject({ agentId: 'a3' })
+  await ui.press({ key: 'configurar-equipo-vacio' })
+  expect(await ui.find({ type: 'Text', text: /0 de 9 seleccionados/ })).toBeDefined()
+  await ui.press({ key: 'cancelar-equipo' })
+  await ui.unmount()
+})
+
+test('solo el equipo participa en los chats, y a un agente fuera se le ofrece incorporarse antes de escribirle', async ($, on) => {
+  const prompts: string[] = []
+  const picks: string[] = []
+  const fills: string[] = []
+  const usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
+  let picked = ''
+  let qaSays = 'Respuesta de QA.'
+  let count = 0
+  mock.store(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('agent.spawn', () => ({ model: 'test', agentId: `a${++count}` }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('prompt.fill', (_, e) => {
+    fills.push(e.text)
+    return { isFilled: true }
+  })
+  on('model.complete', (_, e) => {
+    picks.push(e.prompt)
+    return { value: { isAnswered: true as const, text: picked, usage } }
+  })
+  on('model.fork', (_, e) => {
+    prompts.push(e.prompt)
+    if (e.prompt.includes('eres el Coordinador')) return { value: { isAnswered: true as const, text: 'Respuesta del Coordinador.', usage } }
+    if (e.prompt.includes('agente QA del')) return { value: { isAnswered: true as const, text: qaSays, usage } }
+    const role = /eres el agente ([^ ]+(?: [^ ]+)?) del/.exec(e.prompt)?.[1] ?? '?'
+    return { value: { isAnswered: true as const, text: `Respuesta de ${role}.`, usage } }
+  })
+  const asked = (label: string) => prompts.filter(one => one.includes(`eres el agente ${label} del`))
+  const coordinator = () => prompts.filter(one => one.includes('eres el Coordinador')).at(-1) ?? ''
+
+  // The PO delivered before the team was chosen.
+  await $.agent.spawn({
+    tool_use_id: 't',
+    prompt: 'Trabaja',
+    description: 'Historias del login',
+    subagentType: 'agent-control-center:product-owner',
+    provider: PROVIDER,
+    parentModel: 'test',
+    background: false,
+    fork: false,
+  })
+  await $.turn.complete({ answer: 'Tres historias listas.', durationMs: 1000, isAborted: false, turnId: 'u', agentId: 'a1', reason: 'answer' })
+
+  // The team: PO and QA.
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'configurar-equipo' })
+  for (const role of ['business-analyst', 'ux-ui-designer', 'backend-engineer', 'frontend-engineer', 'code-reviewer', 'devops-engineer', 'research-agent']) {
+    await ui.press({ key: `casilla-${role}` })
+  }
+  await ui.press({ key: 'confirmar-equipo' })
+  await ui.press({ key: 'chat-grupo' })
+
+  // The pick sees only the team; one it names out of it is proposed, not consulted.
+  picked = 'TIPO: otro\n@qa: riesgos de la prueba\n@devops: el pipeline'
+  await ui.input({ key: 'entrada-grupo-0', text: '¿Qué riesgos ves para sacar el login?' })
+  expect(picks.at(-1)).toContain('@qa: QA')
+  expect(picks.at(-1)).not.toContain('@ux: Diseño UX/UI')
+  expect(picks.at(-1)).toContain('Fuera del equipo de esta sesión')
+  expect(picks.at(-1)).toContain('@devops (DevOps)')
+  expect(asked('QA').length).toBe(1)
+  expect(asked('QA')[0]).toContain('Product Owner (@po), QA (@qa)')
+  expect(asked('QA')[0]).not.toContain('DevOps (@devops)')
+  expect(asked('DevOps').length).toBe(0)
+  expect(coordinator()).toContain('Equipo activo de esta sesión, elegido por el usuario: Product Owner y QA.')
+  expect(coordinator()).toContain('haría falta DevOps, que no está en el equipo activo')
+  expect(await ui.find({ type: 'Text', text: /DevOps no está en el equipo de esta sesión/ })).toBeDefined()
+  await ui.press({ key: 'no-incorporar' })
+  expect(await ui.find({ type: 'Text', text: /DevOps sigue fuera del equipo\./ })).toBeDefined()
+  expect(await ui.find({ key: 'incorporar' })).toBeUndefined()
+
+  // A missing specialty the pick flags on its own line.
+  picked = 'TIPO: otro\n@po: el valor\nFUERA: @research'
+  await ui.input({ key: 'entrada-grupo-1', text: '¿Qué librería de PDF usamos?' })
+  expect(coordinator()).toContain('haría falta Investigación')
+  expect(await ui.find({ type: 'Text', text: /Investigación no está en el equipo/ })).toBeDefined()
+
+  // A pick that fails falls to the PO, in the team.
+  picked = ''
+  await ui.input({ key: 'entrada-grupo-2', text: '¿Y el plazo?' })
+  expect(asked('Product Owner').length).toBe(2)
+
+  // Naming one out of the team: offered first, then it gets the message, with the session's context.
+  const before = prompts.length
+  await ui.input({ key: 'entrada-grupo-3', text: '@devops ¿cómo desplegamos esto?' })
+  expect(prompts.length).toBe(before)
+  expect(await ui.find({ type: 'Text', text: /DevOps no está en el equipo de esta sesión\. ¿Lo incorporo y le paso el mensaje\?/ })).toBeDefined()
+  await ui.press({ key: 'incorporar' })
+  expect(asked('DevOps').length).toBe(1)
+  expect(asked('DevOps')[0]).toContain('@devops ¿cómo desplegamos esto?')
+  expect(asked('DevOps')[0]).toContain('Te incorporaste al equipo con la sesión ya empezada')
+  expect(asked('DevOps')[0]).toContain('- Product Owner, tarea «Historias del login»: Tres historias listas.')
+  expect(await ui.find({ type: 'Markdown', text: /Respuesta de DevOps/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /DevOps se incorporó al equipo\./ })).toBeDefined()
+
+  // An agent naming one out of the team: offered, not asked.
+  qaSays = '@ux ¿el botón de Google va arriba?'
+  await ui.input({ key: 'entrada-grupo-4', text: '@qa ¿qué pruebas primero?' })
+  expect(asked('Diseño UX/UI').length).toBe(0)
+  expect(await ui.find({ type: 'Text', text: /Diseño UX\/UI no está en el equipo de esta sesión\. ¿Lo incorporo y le paso el mensaje\?/ })).toBeDefined()
+  await ui.press({ key: 'no-incorporar' })
+
+  // From its own chat, a line for the group naming one out of the team: the same.
+  qaSays = 'Lo consulto.\nAL GRUPO: @reviewer ¿revisaste el callback?'
+  await ui.press({ key: 'volver' })
+  await ui.press({ key: 'chat-qa-engineer' })
+  await ui.input({ key: 'entrada-qa-engineer-0', text: 'Pregúntale a revisión' })
+  expect(asked('Revisión de código').length).toBe(0)
+  await ui.press({ key: 'volver' })
+  await ui.press({ key: 'chat-grupo' })
+  expect(await ui.find({ type: 'Text', text: /Revisión de código no está en el equipo/ })).toBeDefined()
+
+  // A new function goes to the main session with the team named.
+  picked = 'TIPO: funcion'
+  await ui.input({ key: 'entrada-grupo-5', text: 'Quiero exportar a PDF' })
+  expect(fills.at(-1)).toContain('Equipo activo de esta sesión: Product Owner, QA y DevOps. Usa solo esos agentes')
+  expect(await ui.find({ type: 'Markdown', text: /empiezo con el equipo de esta sesión \(Product Owner, QA y DevOps\)/ })).toBeDefined()
+
+  // With no one in the team, the Coordinador answers alone and hands nothing on.
+  await ui.press({ key: 'volver' })
+  await ui.press({ key: 'configurar-equipo' })
+  for (const role of ['product-owner', 'qa-engineer', 'devops-engineer']) await ui.press({ key: `casilla-${role}` })
+  await ui.press({ key: 'confirmar-equipo' })
+  await ui.press({ key: 'chat-grupo' })
+  const consulted = prompts.filter(one => one.includes('eres el agente')).length
+  picked = 'NADIE'
+  await ui.input({ key: 'entrada-grupo-6', text: '¿Quién puede ayudarme?' })
+  expect(prompts.filter(one => one.includes('eres el agente')).length).toBe(consulted)
+  expect(coordinator()).toContain('no consultaste a ningún agente')
+  expect(coordinator()).toContain('Configurar equipo')
+  picked = 'TIPO: funcion'
+  const handed = fills.length
+  await ui.input({ key: 'entrada-grupo-7', text: 'Quiero exportar a Excel' })
+  expect(fills.length).toBe(handed)
+  expect(await ui.find({ type: 'Markdown', text: /No hay ningún agente en el equipo de esta sesión/ })).toBeDefined()
+  await ui.unmount()
+})
