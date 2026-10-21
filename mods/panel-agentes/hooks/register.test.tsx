@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 const PANE = {
   plugin: 'panel-agentes',
@@ -17,6 +17,7 @@ const PANE = {
 const PROVIDER = { plugin: 'agent-control-center', tier: 'user' } as const
 
 test('el panel muestra quién trabaja y qué entregó, en cada superficie', async ($, on) => {
+  mock.store(on)
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('agent.spawn', () => ({ model: 'test', agentId: 'a1' }))
   on('tool.call', () => ({ result: {} }))
@@ -60,4 +61,41 @@ test('el panel muestra quién trabaja y qué entregó, en cada superficie', asyn
     await ui.press({ key: 'a1' })
     await ui.unmount()
   }
+})
+
+test('el modelo elegido en la tarjeta se usa al lanzar el agente', async ($, on) => {
+  const asked: (string | undefined)[] = []
+  mock.store(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('agent.spawn', (_, e) => {
+    asked.push(e.model)
+    return { model: e.model ?? 'claude-sonnet-5-5', agentId: `a${asked.length}` }
+  })
+
+  const spawn = () =>
+    $.agent.spawn({
+      tool_use_id: 't',
+      prompt: 'Revisa',
+      description: 'Revisión',
+      subagentType: 'agent-control-center:code-reviewer',
+      provider: PROVIDER,
+      parentModel: 'test',
+      background: false,
+      fork: false,
+    })
+
+  const desk = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await desk.select({ key: 'modelo-code-reviewer', value: 'opus' })
+  await desk.unmount()
+  await spawn()
+
+  // Mobile has no Select: the card's button walks the models instead.
+  const phone = await $.ui.mount({ ...PANE, surface: 'mobile' })
+  expect(await phone.find({ type: 'Button', text: /Modelo: Opus/ })).toBeDefined()
+  await phone.press({ key: 'modelo-code-reviewer' })
+  expect(await phone.find({ type: 'Button', text: /Modelo: Predeterminado/ })).toBeDefined()
+  await phone.unmount()
+  await spawn()
+
+  expect(asked).toEqual(['opus', undefined])
 })

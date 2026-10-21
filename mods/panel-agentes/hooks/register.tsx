@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { Register } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
 
 import type { AgentRun, RunStatus } from '../types'
 
@@ -50,6 +50,41 @@ const duration = (ms?: number) => {
 const short = (text: string, max: number) =>
   text.length > max ? `${text.slice(0, max - 1)}…` : text
 
+// The model each role runs on, chosen in the panel and kept across sessions.
+// An empty choice leaves the model to the agent's own definition.
+const MODELS_KEY = 'modelos'
+const MODELS: { value: string; label: string }[] = [
+  { value: '', label: 'Predeterminado' },
+  { value: 'haiku', label: 'Haiku' },
+  { value: 'sonnet', label: 'Sonnet' },
+  { value: 'opus', label: 'Opus' },
+]
+
+// A full model id reads as its family: claude-sonnet-… shows as Sonnet.
+const modelLabel = (value: string) =>
+  MODELS.find(one => one.value !== '' && value.includes(one.value))?.label ??
+  MODELS.find(one => one.value === value)?.label ??
+  value
+
+const readModels = async ($: EngineInterface): Promise<Record<string, string>> => {
+  const value = await $.store.get(MODELS_KEY)
+  return value !== null && typeof value === 'object' ? (value as Record<string, string>) : {}
+}
+
+const setModel = async ($: EngineInterface, role: string, model: string) => {
+  const models = { ...(await readModels($)) }
+  if (model === '') delete models[role]
+  else models[role] = model
+  await $.store.set(MODELS_KEY, models)
+}
+
+const STATUS_TEXT: Record<RunStatus, string> = {
+  trabajando: 'Trabajando',
+  entregado: 'Entregó',
+  fallo: 'Falló',
+  interrumpido: 'Interrumpido',
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -67,7 +102,9 @@ export const register: Register = on => {
   })
 
   on('agent.spawn', async ($, e, next) => {
-    const started = await next(e)
+    const role = roleOf(e.subagentType)
+    const chosen = TEAM.some(one => one.role === role) ? (await readModels($))[role] : undefined
+    const started = await next(chosen ? { ...e, model: chosen } : e)
     if (started.deny !== undefined || started.agentId === undefined) return started
 
     const id = started.agentId
@@ -78,10 +115,11 @@ export const register: Register = on => {
     } else {
       const run: AgentRun = {
         id,
-        role: roleOf(e.subagentType),
+        role,
         task: e.description,
         status: 'trabajando',
         tools: 0,
+        model: chosen ?? started.model,
       }
       await update($, runs, list => [...list, run].slice(-50))
     }
@@ -126,30 +164,64 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button, Markdown } = $.ui.resolve(e)
+    const elements = $.ui.resolve(e)
+    const { Box, Text, Button, Markdown } = elements
+    // The mobile app draws no picker yet: there the card's button walks the models.
+    const Select = 'Select' in elements && e.surface !== 'mobile' ? elements.Select : undefined
     const list = await read($, runs)
     const open = await read($, expanded)
     const width = Math.max(20, e.props.bodyColumns)
+
+    const models = await readModels($)
+    // Two cards a row where the pane is wide enough, one otherwise.
+    const perRow = width >= 56 ? 2 : 1
+    const cardWidth = Math.floor((width - (perRow - 1)) / perRow)
 
     const team = TEAM.map(member => {
       const mine = list.filter(one => one.role === member.role)
       const last = mine[mine.length - 1]
       const status = last?.status
+      const model = models[member.role] ?? ''
+      const pick = (value: string) => setModel($, member.role, value)
+      const nextModel = () => {
+        const at = MODELS.findIndex(one => one.value === model)
+        return pick(MODELS[(at + 1) % MODELS.length]?.value ?? '')
+      }
+      const detail =
+        status === 'trabajando' && last
+          ? `${short(last.task, cardWidth - 4)}${last.lastTool ? ` · ${last.lastTool}` : ''}`
+          : status && last
+            ? `${STATUS_TEXT[status]}${last.durationMs !== undefined ? ` · ${duration(last.durationMs)}` : ''}`
+            : 'Libre'
       return (
-        <Box key={`equipo-${member.role}`} flexDirection="column">
-          <Text>
+        <Box
+          key={`tarjeta-${member.role}`}
+          flexDirection="column"
+          width={cardWidth}
+          borderStyle="round"
+          borderColor={status ? COLOR[status] : 'inactive'}
+          paddingX={1}
+        >
+          <Text wrap="truncate-end">
             <Text color={status ? COLOR[status] : 'inactive'}>{status ? ICON[status] : '○'}</Text>{' '}
-            <Text bold={status === 'trabajando'} dimColor={!status}>
-              {member.label}
-            </Text>
+            <Text bold>{member.label}</Text>
             {mine.length > 1 && <Text dimColor> ×{mine.length}</Text>}
           </Text>
-          {status === 'trabajando' && last && (
-            <Text dimColor wrap="truncate-end">
-              {'  '}
-              {short(last.task, width - 2)}
-              {last.lastTool ? ` · ${last.lastTool}` : ''}
-            </Text>
+          <Text dimColor wrap="truncate-end">
+            {detail}
+          </Text>
+          {Select ? (
+            <Select
+              key={`modelo-${member.role}`}
+              label="Modelo"
+              options={MODELS}
+              value={model}
+              onSelect={value => pick(value)}
+            />
+          ) : (
+            <Button key={`modelo-${member.role}`} plain onPress={nextModel}>
+              Modelo: {modelLabel(model)} <Text dimColor>▸</Text>
+            </Button>
           )}
         </Box>
       )
@@ -161,7 +233,9 @@ export const register: Register = on => {
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="column">
           <Text bold>Equipo</Text>
-          {team}
+          <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
+            {team}
+          </Box>
         </Box>
         <Box flexDirection="column">
           <Text bold>Entregas</Text>
@@ -170,7 +244,11 @@ export const register: Register = on => {
           )}
           {done.map(run => {
             const isOpen = open === run.id
-            const facts = [duration(run.durationMs), `${run.tools} herramientas`]
+            const facts = [
+              run.model ? modelLabel(run.model) : '',
+              duration(run.durationMs),
+              `${run.tools} herramientas`,
+            ]
               .filter(Boolean)
               .join(' · ')
             return (
