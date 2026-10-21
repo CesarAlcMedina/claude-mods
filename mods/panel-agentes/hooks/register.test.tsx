@@ -887,3 +887,100 @@ test('solo el equipo participa en los chats, y a un agente fuera se le ofrece in
   expect(await ui.find({ type: 'Markdown', text: /No hay ningún agente en el equipo de esta sesión/ })).toBeDefined()
   await ui.unmount()
 })
+
+test('la barra del límite de 5 h: sin datos, 0 %, intermedio, límite, desactualizada y vencida', async ($, on) => {
+  const HOUR = 3_600_000
+  const START = Date.parse('2026-10-21T12:00:00Z')
+  let now = START
+  let usage: { kind: string; percentUsed: number; resetsAt?: string }[] = []
+  const periods: (() => void)[] = []
+  const at = (ms: number) => new Date(ms).toISOString()
+  const context = { window: 200000 }
+  mock.store(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('clock.now', () => ({ value: now }))
+  on('session.usage', () => ({ value: { startedAt: START, context, rateLimits: usage } }))
+  on('session.measure', (_, e) => ({ changed: e.changed }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  // The countdown's timer: each period waits until the test lets it pass.
+  on('clock.every', () => new Promise(resolve => periods.push(() => resolve({ value: undefined }))))
+  const measure = (rateLimits: typeof usage) => $.session.measure({ context, rateLimits, changed: ['rateLimits'] })
+
+  // No reading yet: nothing made up, and the weekly window is never shown.
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // One period of the timer, then the pane once it redrew with what it brings.
+  const tickOnce = async (shows: RegExp) => {
+    periods.shift()?.()
+    for (let i = 0; i < 200 && (await ui.find({ type: 'Text', text: shows })) === undefined; i++) {
+      // the tick runs in its own dispatch
+    }
+  }
+  expect(await ui.find({ type: 'Text', text: /^Límite de sesión · 5 h$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Uso no disponible$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^—$/ })).toBeDefined()
+  await measure([{ kind: 'seven_day', percentUsed: 80, resetsAt: at(START + 72 * HOUR) }])
+  expect(await ui.find({ type: 'Text', text: /^Uso no disponible$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /80/ })).toBeUndefined()
+
+  // 0 % is a real reading.
+  await measure([{ kind: 'five_hour', percentUsed: 0, resetsAt: at(START + 2 * HOUR) }])
+  expect(await ui.find({ type: 'Text', text: /^0 %$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Se restablece en 2 h$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^░{36}$/ })).toBeDefined()
+
+  // Partway: 37.5 % of 36 cells.
+  await measure([
+    { kind: 'five_hour', percentUsed: 37.5, resetsAt: at(START + 2 * HOUR) },
+    { kind: 'seven_day', percentUsed: 80, resetsAt: at(START + 72 * HOUR) },
+  ])
+  expect(await ui.find({ type: 'Text', text: /^37,5 %$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^█{14}$/ })).toBeDefined()
+
+  // The countdown moves on its timer, with no new reading and no model call.
+  now = START + 10 * 60_000
+  await tickOnce(/^Se restablece en 1 h 50 min$/)
+  expect(await ui.find({ type: 'Text', text: /^Se restablece en 1 h 50 min$/ })).toBeDefined()
+
+  // The limit reached.
+  await measure([{ kind: 'five_hour', percentUsed: 100, resetsAt: at(START + 2 * HOUR) }])
+  expect(await ui.find({ type: 'Text', text: /^100 %$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Límite alcanzado · Se restablece en 1 h 50 min$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^█{36}$/ })).toBeDefined()
+
+  // No new reading for a while: it says how old it is. The timer's reread
+  // finds the same figures, which does not make them fresh.
+  usage = [{ kind: 'five_hour', percentUsed: 100, resetsAt: at(START + 2 * HOUR) }]
+  now = START + 40 * 60_000
+  await tickOnce(/^Límite alcanzado · Se restablece en 1 h 20 min · datos de hace 30 min$/)
+  expect(await ui.find({ type: 'Text', text: /^Límite alcanzado · Se restablece en 1 h 20 min · datos de hace 30 min$/ })).toBeDefined()
+
+  // Past the reset time: no 0 % until new data says so.
+  now = START + 2 * HOUR + 60_000
+  await tickOnce(/^La ventana ya se restableció: esperando datos nuevos$/)
+  expect(await ui.find({ type: 'Text', text: /^La ventana ya se restableció: esperando datos nuevos$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^—$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^0 %$/ })).toBeUndefined()
+
+  // The timer's reread brings the new window.
+  usage = [{ kind: 'five_hour', percentUsed: 3, resetsAt: at(START + 7 * HOUR) }]
+  await tickOnce(/^3 %$/)
+  expect(await ui.find({ type: 'Text', text: /^3 %$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Se restablece en 4 h 59 min$/ })).toBeDefined()
+
+  // The bar heads each chat too, and the team below it still works.
+  await ui.press({ key: 'chat-grupo' })
+  expect(await ui.find({ key: 'limite-sesion' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^3 %$/ })).toBeDefined()
+  await ui.press({ key: 'volver' })
+  expect(await ui.find({ key: 'tarjeta-coordinador' })).toBeDefined()
+  await ui.unmount()
+
+  // Every surface draws it.
+  for (const surface of ['terminal', 'vscode', 'mobile'] as const) {
+    const other = await $.ui.mount({ ...PANE, surface })
+    expect(await other.find({ type: 'Text', text: /^Límite de sesión · 5 h$/ })).toBeDefined()
+    await other.unmount()
+  }
+})
