@@ -25,6 +25,8 @@ export type ChatMessage = {
   text: string
   /** True while the answer is on its way. */
   isPending?: boolean
+  /** The panel's own quiet line, such as no one having anything to add. */
+  isNote?: true
 }
 
 /** Which cards the team tabs show. */

@@ -8,6 +8,8 @@ const TITLE = 'Agentes'
 const PREFIX = 'agent-control-center:'
 const GROUP = 'grupo'
 const ME = 'tu'
+// The panel's own quiet lines in a chat.
+const NOTE = 'panel'
 
 const runs = atom({ plugin: 'panel-agentes', key: 'runs' } as const, [])
 const expanded = atom({ plugin: 'panel-agentes', key: 'expanded' } as const, null)
@@ -234,14 +236,35 @@ const svg = (body: string, size: number) =>
 // no tools: a spawned agent would start without a request of the person's,
 // which auto mode refuses. The answer forks the session's own conversation,
 // so it knows the project and what the team did; where there is nothing to
-// fork yet, a plain completion answers. A group message that names no one
-// is answered by the one or two roles a quick model call picks for it; a
-// role that still has nothing to add answers PASS and is left out.
+// fork yet, a plain completion answers.
+//
+// A group message that names no one goes to the roles a quick model call
+// picks for what the message needs from them: one as a rule, a second only
+// for something the first cannot give, and none when nothing is asked or
+// left open. Roles answer one after another, each seeing what was already
+// said to the message, so a later one can pass (PASS) instead of saying it
+// again.
 const PASS = 'PASO'
+const NOBODY = 'NADIE'
+// What an agent reads of its chat (and, in its own chat, of the group's),
+// and what the pick reads: the chats' own lines, not only those the pane
+// shows.
 const HISTORY_CHARS = 8000
+const PICK_CHARS = 4000
+const GROUP_CHARS = 3000
 const PICKED = 2
 // The chat shows its last lines; the earlier ones open on request.
 const SHOWN = 12
+
+// One role's turn at a message: what it is asked to bring, and whether it
+// must answer or may pass.
+type Turn = { role: string; aim?: string; mustAnswer: boolean }
+
+const isPass = (answer: string) => new RegExp(`^${PASS}\\.?$`, 'i').test(answer)
+const isQuestion = (text: string) => /[?¿]/.test(text)
+
+const roleNamed = (word: string) =>
+  TEAM.find(one => one.role === word || one.aliases.includes(word))?.role
 
 // The roles a group message names with @, or every role when it names none.
 const addressed = (text: string) => {
@@ -252,40 +275,67 @@ const addressed = (text: string) => {
   return { roles: named.length > 0 ? named : TEAM.map(one => one.role), isNamed: named.length > 0 }
 }
 
-// The roles that should answer a group message that names no one: a cheap
-// completion picks them; failing that, the Product Owner answers.
-const pick = async ($: EngineInterface, history: ChatMessage[], text: string) => {
+// The pick's lines, «@alias: what to bring», in the order written.
+const turnsOf = (text: string): Turn[] => {
+  const turns: Turn[] = []
+  for (const m of text.matchAll(/@([\p{L}/-]+)([^@\n]*)/gu)) {
+    const role = roleNamed((m[1] ?? '').toLowerCase())
+    if (role === undefined || turns.some(one => one.role === role)) continue
+    const aim = (m[2] ?? '').replace(/^[\s:,;—–-]+|[\s,;]+$/g, '')
+    turns.push({ role, aim: aim || undefined, mustAnswer: turns.length === 0 })
+  }
+  return turns
+}
+
+// Who answers a group message that names no one. A clear "no one" stands,
+// unless the person asked something; a pick that fails or names no one
+// usable still leaves one role to answer, the Product Owner, asked to answer
+// or to ask what is missing.
+const pick = async ($: EngineInterface, history: ChatMessage[], text: string): Promise<Turn[]> => {
   const team = TEAM.map(one => `@${one.aliases[0]}: ${one.label}, ${one.job}`).join('\n')
   const prompt = [
-    'Eres quien reparte los mensajes del chat de grupo de un equipo de agentes de software.',
+    'Decides quién contesta en el chat de grupo de un equipo de agentes de software. Cada respuesta pide atención al usuario: elige por la aportación concreta que necesita el mensaje, no solo por la especialidad.',
     `El equipo:\n${team}`,
-    history.length > 0 ? `Chat hasta ahora:\n\n${transcript(history.slice(-6))}` : '',
+    history.length > 0
+      ? `Chat hasta ahora (fíjate en lo que sigue pendiente: preguntas sin contestar, decisiones a medias):\n\n${transcript(history, PICK_CHARS)}`
+      : '',
     `Mensaje nuevo del usuario:\n\n${text}`,
-    `¿Qué roles deben contestar? Elige como mucho ${PICKED}, los que más tienen que aportar; uno basta para un saludo o una pregunta sencilla. Responde solo con sus alias separados por comas, por ejemplo: @po, @qa`,
+    [
+      'Reglas:',
+      '- Lo normal es un solo agente. Elige un segundo solo si aporta algo distinto que el primero no puede dar: otra parte de la respuesta, otra evidencia, otro riesgo. Que dos roles tengan que ver con el tema no significa que deban contestar los dos.',
+      '- Si el usuario comunica una decisión o confirma algo, basta con que la reconozca un agente: el que tiene que actuar o el que tiene algo que añadir. Nunca una ronda de confirmaciones.',
+      '- Una pregunta del usuario siempre necesita a alguien que la conteste o pida la aclaración que falte.',
+      `- Si el mensaje no pide nada (un gracias, un vale) o el usuario cierra la conversación, responde solo ${NOBODY}, aunque quede algo pendiente: se retoma cuando vuelva.`,
+      '- Lo que pides a cada uno es una aportación de chat, no una tarea ni un entregable: dilo en pocas palabras. Ante una decisión, pide reconocerla y, si lo hay, el siguiente paso o un riesgo; nunca que rehaga requisitos, planes o documentos.',
+      `Responde solo con una línea por agente, ${PICKED} como mucho y el más necesario primero, así: @alias: lo concreto que debe aportar. O solo ${NOBODY}.`,
+    ].join('\n'),
   ]
     .filter(Boolean)
     .join('\n\n')
   const reply = await $.model
     .complete({ model: 'haiku', prompt, effort: 'low' })
     .catch(() => ({ isAnswered: false as const }))
-  // In the order the pick named them, the first ones first.
-  const words = [...(reply.isAnswered ? reply.text : '').toLowerCase().matchAll(/@([\p{L}/-]+)/gu)]
-  const roles = words
-    .map(m => TEAM.find(one => one.role === m[1] || one.aliases.includes(m[1] ?? ''))?.role)
-    .filter((role, at, all): role is string => role !== undefined && all.indexOf(role) === at)
-  return roles.length > 0 ? roles.slice(0, PICKED) : ['product-owner']
+  const said = reply.isAnswered ? reply.text.trim() : ''
+  const turns = turnsOf(said).slice(0, PICKED)
+  if (turns.length > 0) return turns
+  const isNobody = said.replace(/[\s.*_]/g, '').toUpperCase() === NOBODY
+  if (isNobody && !isQuestion(text)) return []
+  return [{ role: 'product-owner', aim: 'contestar al usuario o pedirle la aclaración que haga falta', mustAnswer: true }]
 }
 
-const transcript = (messages: ChatMessage[]) => {
+// A chat as text, in at most max characters. Over the limit the oldest
+// answers go first: what the person said, their decisions among it, stays
+// longest. The newest line always stays.
+const transcript = (messages: ChatMessage[], max = HISTORY_CHARS) => {
   const lines = messages
-    .filter(one => !one.isPending)
-    .map(one => `${labelOf(one.from)}: ${one.text}`)
-  let text = lines.join('\n\n')
-  while (text.length > HISTORY_CHARS && lines.length > 1) {
-    lines.shift()
-    text = lines.join('\n\n')
+    .filter(one => !one.isPending && !one.isNote)
+    .map(one => ({ isMine: one.from === ME, text: `${labelOf(one.from)}: ${one.text}` }))
+  const size = () => lines.reduce((sum, one) => sum + one.text.length + 2, 0)
+  while (size() > max && lines.length > 1) {
+    const at = lines.findIndex(one => !one.isMine)
+    lines.splice(at < 0 || at === lines.length - 1 ? 0 : at, 1)
   }
-  return text
+  return lines.map(one => one.text).join('\n\n')
 }
 
 // What the panel knows of a role's own work this session.
@@ -308,49 +358,80 @@ const workOf = (role: string, list: AgentRun[]) => {
 // Agents reach each other through the group chat. In its own chat a role
 // that must ask another writes a line opening with TO_GROUP; the panel posts
 // it in the group, and whoever it names with @ answers there. A reply in the
-// group that names others with @ is answered the same way. HOPS bounds how
-// far one message of the person's can travel from agent to agent, and
-// RELAYS how many answers between agents it can start in all.
+// group that names others with @ is answered the same way, and the one named
+// may pass when nothing is left to answer. HOPS bounds how far one message
+// of the person's can travel from agent to agent, and RELAYS how many
+// answers between agents it can start in all.
 const TO_GROUP = /^[\s*_]*al grupo[\s*_]*:[\s*_]*/i
 const HOPS = 2
 const RELAYS = 3
 
-const chatPrompt = (
-  role: string,
-  channel: string,
-  history: ChatMessage[],
-  text: string,
-  from: string,
-  mustAnswer: boolean,
-  canReach: boolean,
-  work: string,
-) => {
+// How every chat answer talks, and what it may claim without tools.
+const VOICE = [
+  'Cómo hablas:',
+  '- En español, como en un chat de trabajo. Breve por defecto, a la medida de lo que se pide: una confirmación o un dato, una frase; una respuesta normal, dos a cuatro frases, por debajo de unas 80 palabras. Un plan, una lista larga, código o un entregable completo solo si te lo piden; si el tema da para más, da lo esencial y ofrece el detalle.',
+  '- Respeta lo que el usuario ya decidió en la conversación. Si una pregunta o una propuesta choca con una decisión suya, dilo en lugar de contradecirla.',
+  '- Ve directo a lo que aportas. No abras con fórmulas («Perfecto», «Entendido», «Claro», «Buena pregunta»), no resumas el mensaje al que contestas y no anuncies tu rol («Como QA…», «Desde backend…»).',
+  '- Listas o código solo si te los piden o si de verdad hacen falta. Sin títulos ni negritas.',
+  '- Te distingue tu criterio profesional y lo que te preocupa desde tu especialidad, no un personaje: sin emociones, anécdotas ni experiencias humanas.',
+].join('\n')
+
+const TRUTH = [
+  'Qué puedes afirmar:',
+  '- En este chat no tienes herramientas: no lees ni cambias archivos y no ejecutas nada. Nunca digas que estás editando, probando, revisando el código o incorporando cambios, ni que lo vas a hacer ahora.',
+  '- Distingue lo que recomiendas, lo que ya está hecho (solo si aparece en tu trabajo de esta sesión o en la conversación) y lo que falta ejecutar. Para lo que hay que ejecutar, dilo y sugiere pedírselo a Claude en el chat principal.',
+].join('\n')
+
+type Prompt = {
+  role: string
+  channel: string
+  /** In a role's own chat, the group's lines, for what was decided there. */
+  group: ChatMessage[]
+  before: ChatMessage[]
+  message: ChatMessage
+  since: ChatMessage[]
+  turn: Turn
+  canReach: boolean
+  work: string
+}
+
+const chatPrompt = ({ role, channel, group, before, message, since, turn, canReach, work }: Prompt) => {
   const isGroup = channel === GROUP
   const member = TEAM.find(one => one.role === role)
   const team = TEAM.map(one => `${one.label} (@${one.aliases[0]})`).join(', ')
-  const writer = from === ME ? 'del usuario' : `del agente ${labelOf(from)}`
+  const writer = message.from === ME ? 'del usuario' : `del agente ${labelOf(message.from)}`
   const reach = !canReach
     ? 'No nombres a otros agentes con @ en esta respuesta.'
     : isGroup
-      ? 'Nombra con @ a otro agente solo si sin su respuesta no puedes seguir; nunca de pasada. Si te escribe otro agente, contéstale y no le devuelvas la pregunta.'
-      : `Si el usuario te pide hablar con otro agente, o necesitas algo de otro, añade al final una línea que empiece por «AL GRUPO:» con el mensaje para el chat de grupo, nombrando con @ a quien va dirigido. El equipo: ${team}. Ese agente te contestará en el chat de grupo.`
+      ? 'Nombra con @ a otro agente solo para resolver una dependencia concreta: una pregunta que solo ese rol puede contestar y sin cuya respuesta no puedes seguir; hazla concreta. Nunca para pedir que confirme, para agradecer o de pasada. Si te escribe otro agente, contesta lo que te pide sin devolverle la pregunta.'
+      : `Si el usuario te pide hablar con otro agente, o necesitas algo concreto de otro para seguir, añade al final una línea que empiece por «AL GRUPO:» con el mensaje para el chat de grupo, nombrando con @ a quien va dirigido. El equipo: ${team}. Ese agente te contestará en el chat de grupo.`
+  const pass = turn.mustAnswer
+    ? ''
+    : message.from === ME
+      ? `Si lo que ibas a aportar ya está dicho, o no tienes nada nuevo, responde solo con la palabra ${PASS}.`
+      : `Si el mensaje ya no te pide nada (solo confirma, agradece o cierra el tema), o lo que ibas a decir ya está dicho, responde solo con la palabra ${PASS}: la conversación puede terminar ahí.`
   return [
     `A partir de aquí no eres el asistente principal: eres el agente ${labelOf(role)} del Agent Control Center, que se ocupa de ${member?.job ?? 'su rol'}.`,
     isGroup
       ? `Estás en el chat de grupo del panel de agentes, con el usuario y todo el equipo: ${team}.`
       : 'Estás en tu chat con el usuario en el panel de agentes.',
     `Lo que has hecho en esta sesión:\n${work}`,
-    // Answers in the pane read as chat lines: short, plain text, no report.
+    VOICE,
     isGroup
-      ? 'Responde en español como en un chat de grupo: una sola frase, de 25 palabras como mucho, sin listas, títulos, negritas ni código, en primera persona y desde tu rol. No repitas lo que ya dijo otro agente ni expliques lo que vas a hacer paso a paso.'
-      : 'Responde en español como en un chat: una o dos frases, de 40 palabras como mucho, sin listas, títulos, negritas ni código, en primera persona y desde tu rol.',
-    'Da más detalle solo si te lo piden. Usa lo que sabes de la conversación y del proyecto. En este chat no tienes herramientas: si hace falta hacer algo, dilo y sugiere pedírselo a Claude.',
-    reach,
-    isGroup && !mustAnswer
-      ? `Si desde tu rol no tienes nada útil que aportar a este mensaje, responde solo con la palabra ${PASS}.`
+      ? 'Aporta solo lo nuevo: una respuesta pendiente, una decisión, evidencia, un riesgo concreto, una pregunta necesaria o un avance verificado. Repetir o reformular lo que ya se dijo no cuenta. Ante una decisión del usuario, reconócela en una frase y añade solo lo que cambia o el siguiente paso; no rehagas entregables en el chat.'
       : '',
-    history.length > 0 ? `Chat hasta ahora:\n\n${transcript(history)}` : '',
-    `Mensaje nuevo ${writer}:\n\n${text}`,
+    TRUTH,
+    reach,
+    turn.aim ? `Lo que se espera de ti en este mensaje (una aportación de chat, no un entregable): ${turn.aim}.` : '',
+    pass,
+    group.length > 0
+      ? `Lo último del chat de grupo, donde el usuario también decide cosas con el equipo:\n\n${transcript(group, GROUP_CHARS)}`
+      : '',
+    before.length > 0 ? `Chat hasta ahora:\n\n${transcript(before)}` : '',
+    `Mensaje nuevo ${writer}:\n\n${message.text}`,
+    since.length > 0
+      ? `Lo que ya se respondió a este mensaje:\n\n${transcript(since)}\n\nNo lo repitas ni lo reformules: añade solo lo que falte.`
+      : '',
   ]
     .filter(Boolean)
     .join('\n\n')
@@ -369,22 +450,34 @@ const reached = (text: string, writer: string) => {
   return isNamed ? roles.filter(role => role !== writer) : []
 }
 
-// As many of the roles as the budget still allows, spending it.
-const take = (roles: string[], budget: { left: number }) => {
+// As many of the roles as the budget still allows, spending it. An agent
+// written to by another may pass.
+const take = (roles: string[], budget: { left: number }): Turn[] => {
   const taken = roles.slice(0, Math.max(0, budget.left))
   budget.left -= taken.length
-  return taken
+  return taken.map(role => ({ role, mustAnswer: false }))
 }
 
 const send = async ($: EngineInterface, channel: string, text: string) => {
   const said = text.trim()
   if (said === '') return
   const history = (await read($, chat)).filter(one => one.channel === channel)
-  await update($, chat, lines => [...lines, { id: crypto.randomUUID(), channel, from: ME, text: said }])
+  const message: ChatMessage = { id: crypto.randomUUID(), channel, from: ME, text: said }
+  await update($, chat, lines => [...lines, message])
   await follow($, channel)
   const named = channel === GROUP ? addressed(said) : { roles: [channel], isNamed: true }
-  const roles = named.isNamed ? named.roles : await pick($, history, said)
-  await ask($, channel, roles, history, said, ME, true, 0, { left: RELAYS })
+  // Whoever the person names must answer.
+  const turns = named.isNamed
+    ? named.roles.map(role => ({ role, mustAnswer: true }))
+    : await pick($, history, said)
+  if (turns.length === 0) {
+    await update($, chat, lines => [
+      ...lines,
+      { id: crypto.randomUUID(), channel, from: NOTE, text: 'Nadie tenía nada que añadir.', isNote: true as const },
+    ])
+    return
+  }
+  await ask($, channel, turns, message, 0, { left: RELAYS })
 }
 
 const openChat = async ($: EngineInterface, channel: string) => {
@@ -398,75 +491,78 @@ const follow = async ($: EngineInterface, channel: string) => {
   await $.ui.scroll({ to: 'end', in: PANE }).catch(() => undefined)
 }
 
-// Each role answers one message in a channel; what they say to others is
-// passed on, a hop further.
+// The roles answer one message in a channel one after another, each with
+// what was already said to it; what they say to others is passed on, a hop
+// further, before the next role answers.
 const ask = async (
   $: EngineInterface,
   channel: string,
-  roles: string[],
-  history: ChatMessage[],
-  text: string,
-  from: string,
-  mustAnswer: boolean,
+  turns: Turn[],
+  message: ChatMessage,
   hop: number,
   budget: { left: number },
 ) => {
-  const list = await read($, runs)
+  for (const turn of turns) await answer($, channel, turn, message, hop, budget)
+}
+
+const answer = async (
+  $: EngineInterface,
+  channel: string,
+  turn: Turn,
+  message: ChatMessage,
+  hop: number,
+  budget: { left: number },
+) => {
+  const { role } = turn
   const canReach = hop < HOPS
-  const waiting = roles.map(role => ({ role, id: crypto.randomUUID() }))
-  await update($, chat, lines => [
-    ...lines,
-    ...waiting.map(({ role, id }) => ({ id, channel, from: role, text: '', isPending: true })),
-  ])
+  const id = crypto.randomUUID()
+  const everything = (await read($, chat)).filter(one => !one.isPending)
+  const lines = everything.filter(one => one.channel === channel)
+  const group = channel === GROUP ? [] : everything.filter(one => one.channel === GROUP)
+  const at = lines.findIndex(one => one.id === message.id)
+  const before = at < 0 ? lines : lines.slice(0, at)
+  const since = at < 0 ? [] : lines.slice(at + 1)
+  await update($, chat, all => [...all, { id, channel, from: role, text: '', isPending: true }])
+  await follow($, channel)
 
-  await Promise.all(
-    waiting.map(async ({ role, id }) => {
-      const prompt = chatPrompt(role, channel, history, text, from, mustAnswer, canReach, workOf(role, list))
-      const reply = await answerAs($, role, prompt).catch((error: unknown) => ({
-        isAnswered: false as const,
-        reason: String(error),
-      }))
-      const answer = reply.isAnswered ? reply.text.trim() : ''
-      const isPass = answer === PASS || answer === `${PASS}.`
+  const work = workOf(role, await read($, runs))
+  const prompt = chatPrompt({ role, channel, group, before, message, since, turn, canReach, work })
+  const reply = await answerAs($, role, prompt).catch((error: unknown) => ({
+    isAnswered: false as const,
+    reason: String(error),
+  }))
+  const text = reply.isAnswered ? reply.text.trim() : ''
+  const passes = isPass(text) && !turn.mustAnswer
 
-      // In its own chat, the line for the group leaves the reply.
-      const lines = answer.split('\n')
-      const at = channel === GROUP || !canReach ? -1 : lines.findIndex(line => TO_GROUP.test(line))
-      const toGroup = at < 0 ? '' : lines.slice(at).join('\n').replace(TO_GROUP, '').trim()
-      const kept = at < 0 ? answer : lines.slice(0, at).join('\n').trim()
-      const shown = toGroup === '' ? kept : `${kept}\n\n_Le escribí al chat de grupo: «${toGroup}»_`.trim()
+  // In its own chat, the line for the group leaves the reply.
+  const split = text.split('\n')
+  const cut = channel === GROUP || !canReach ? -1 : split.findIndex(line => TO_GROUP.test(line))
+  const toGroup = cut < 0 ? '' : split.slice(cut).join('\n').replace(TO_GROUP, '').trim()
+  const kept = cut < 0 ? text : split.slice(0, cut).join('\n').trim()
+  const shown = toGroup === '' ? kept : `${kept}\n\n_Le escribí al chat de grupo: «${toGroup}»_`.trim()
 
-      await update($, chat, all =>
-        all.flatMap(one => {
-          if (one.id !== id) return [one]
-          if (isPass) return []
-          const said = reply.isAnswered
-            ? shown || '_Sin respuesta._'
-            : `_No pude contestar (${reply.reason})._`
-          return [{ id, channel, from: role, text: said }]
-        }),
-      )
-      await follow($, channel)
-      if (!canReach || isPass || !reply.isAnswered) return
-
-      if (toGroup !== '') {
-        const before = (await read($, chat)).filter(one => one.channel === GROUP)
-        await update($, chat, all => [
-          ...all,
-          { id: crypto.randomUUID(), channel: GROUP, from: role, text: toGroup },
-        ])
-        const targets = take(reached(toGroup, role), budget)
-        if (targets.length > 0) await ask($, GROUP, targets, before, toGroup, role, true, hop + 1, budget)
-        return
-      }
-      if (channel === GROUP) {
-        const targets = take(reached(answer, role), budget)
-        if (targets.length === 0) return
-        const before = (await read($, chat)).filter(one => one.channel === GROUP && one.id !== id)
-        await ask($, GROUP, targets, before, answer, role, true, hop + 1, budget)
-      }
+  await update($, chat, all =>
+    all.flatMap(one => {
+      if (one.id !== id) return [one]
+      if (passes) return []
+      const said = reply.isAnswered ? shown || '_Sin respuesta._' : `_No pude contestar (${reply.reason})._`
+      return [{ id, channel, from: role, text: said }]
     }),
   )
+  await follow($, channel)
+  if (!canReach || passes || !reply.isAnswered) return
+
+  if (toGroup !== '') {
+    const posted: ChatMessage = { id: crypto.randomUUID(), channel: GROUP, from: role, text: toGroup }
+    await update($, chat, all => [...all, posted])
+    const targets = take(reached(toGroup, role), budget)
+    if (targets.length > 0) await ask($, GROUP, targets, posted, hop + 1, budget)
+    return
+  }
+  if (channel === GROUP) {
+    const targets = take(reached(text, role), budget)
+    if (targets.length > 0) await ask($, GROUP, targets, { id, channel, from: role, text }, hop + 1, budget)
+  }
 }
 
 export const register: Register = on => {
@@ -662,6 +758,13 @@ export const register: Register = on => {
           )}
           {shownLines.map(one => {
             const isMine = one.from === ME
+            if (one.isNote) {
+              return (
+                <Text key={`mensaje-${one.id}`} dimColor italic>
+                  {one.text}
+                </Text>
+              )
+            }
             return (
               <Box
                 key={`mensaje-${one.id}`}

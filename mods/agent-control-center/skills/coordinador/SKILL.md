@@ -9,6 +9,7 @@ La sesión principal actúa como **coordinador** de nueve subagentes del plugin 
 
 ## Flujo estándar
 product-owner → business-analyst → ux-ui-designer (si hay interfaz) → backend-engineer y/o frontend-engineer → code-reviewer → qa-engineer → devops-engineer
+
 research-agent: apoyo bajo demanda en cualquier fase.
 
 ## Selección de agentes

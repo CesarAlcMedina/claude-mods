@@ -130,7 +130,8 @@ test('el chat con un agente y el de grupo', async ($, on) => {
   await ui.press({ key: 'chat-qa-engineer' })
   await ui.input({ key: 'entrada-qa-engineer-0', text: '¿Qué estás haciendo?' })
   expect(prompts[0]).toContain('eres el agente QA del')
-  expect(prompts[0]).toContain('40 palabras como mucho')
+  expect(prompts[0]).toContain('Breve por defecto')
+  expect(prompts[0]).toContain('no tienes herramientas')
   expect(prompts[0]).toContain('¿Qué estás haciendo?')
   expect(await ui.find({ type: 'Markdown', text: /Respuesta de QA/ })).toBeDefined()
 
@@ -145,22 +146,29 @@ test('el chat con un agente y el de grupo', async ($, on) => {
   expect(await ui.find({ key: 'chat-grupo' })).toBeDefined()
   await ui.press({ key: 'chat-grupo' })
 
-  // Naming someone asks only them, and they must answer; @dev is both engineers.
+  // Naming someone asks only them, and they must answer; @dev is both
+  // engineers. They answer in turn, each seeing what the others said.
   await ui.input({ key: 'entrada-grupo-0', text: '@po @dev ¿empezamos?' })
   expect(prompts.length).toBe(5)
   expect(prompts[2]).toContain('agente Product Owner')
   expect(prompts[3]).toContain('agente Backend del')
   expect(prompts[4]).toContain('agente Frontend del')
   expect(prompts[2]).not.toContain('PASO')
+  expect(prompts[2]).not.toContain('Lo que ya se respondió')
+  expect(prompts[4]).toContain('Lo que ya se respondió a este mensaje:\n\nProduct Owner: Respuesta de Product Owner.\n\nBackend: Respuesta de Backend.')
 
-  // Naming nobody, a quick pick chooses who answers: two at most.
+  // Naming nobody, a quick pick chooses who answers: two at most, and the
+  // second may pass once it sees the first.
   await ui.input({ key: 'entrada-grupo-1', text: 'Hola equipo' })
   expect(picks.length).toBe(1)
   expect(picks[0]).toContain('Hola equipo')
   expect(prompts.length).toBe(7)
   expect(prompts[5]).toContain('agente Diseño UX/UI')
   expect(prompts[6]).toContain('agente QA')
-  expect(prompts[5]).toContain('25 palabras como mucho')
+  expect(prompts[5]).toContain('Aporta solo lo nuevo')
+  expect(prompts[5]).not.toContain('PASO')
+  expect(prompts[6]).toContain('responde solo con la palabra PASO')
+  expect(prompts[6]).toContain('Diseño UX/UI: Respuesta de Diseño UX/UI.')
   expect(await ui.find({ type: 'Markdown', text: /Respuesta de Diseño UX\/UI/ })).toBeDefined()
 
   // Emptying the chat clears its lines.
@@ -224,7 +232,7 @@ test('los agentes se escriben en el chat de grupo', async ($, on) => {
   expect(await ui.find({ type: 'Markdown', text: /^AL GRUPO/ })).toBeUndefined()
   expect(prompts.length).toBe(2)
   expect(prompts[1]).toContain('Mensaje nuevo del agente Diseño UX/UI')
-  expect(prompts[1]).not.toContain('PASO')
+  expect(prompts[1]).toContain('la conversación puede terminar ahí')
 
   await ui.press({ key: 'volver' })
   await ui.press({ key: 'chat-grupo' })
@@ -232,11 +240,137 @@ test('los agentes se escriben en el chat de grupo', async ($, on) => {
   expect(await ui.find({ type: 'Markdown', text: /Primero el bloque 2/ })).toBeDefined()
 
   // Agents who keep naming each other stop after a few hops and answers:
-  // QA asks both engineers (@dev), they ask QA back, and QA answers once more.
+  // QA asks both engineers (@dev); Backend asks QA back, who answers once
+  // more, and then Frontend answers, having seen all of it.
   await ui.input({ key: 'entrada-grupo-0', text: '@qa ¿cómo vas?' })
   expect(prompts.length).toBe(6)
+  expect(prompts[3]).toContain('agente Backend del')
   expect(prompts[3]).toContain('Mensaje nuevo del agente QA')
-  expect(prompts[5]).toContain('No nombres a otros agentes')
+  expect(prompts[4]).toContain('agente QA del')
+  expect(prompts[4]).toContain('No nombres a otros agentes')
+  expect(prompts[5]).toContain('agente Frontend del')
+  expect(prompts[5]).toContain('Backend: @qa Casi, ¿y tú?')
+  await ui.unmount()
+})
+
+test('menos ecos: quién contesta, en qué orden y cuándo callan', async ($, on) => {
+  const prompts: string[] = []
+  const picks: string[] = []
+  const usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
+  let picked: string | null = ''
+  mock.store(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('model.complete', (_, e) => {
+    picks.push(e.prompt)
+    return picked === null
+      ? { value: { isAnswered: false as const, reason: 'aborted' as const, usage } }
+      : { value: { isAnswered: true as const, text: picked, usage } }
+  })
+  // Each role says something of its own, but Reviewer passes once QA has
+  // spoken, and the PO passes a thank-you from another agent.
+  on('model.fork', (_, e) => {
+    prompts.push(e.prompt)
+    const said = (text: string) => ({ value: { isAnswered: true as const, text, usage } })
+    if (e.prompt.includes('agente Revisión de código del') && e.prompt.includes('QA: ')) return said('PASO')
+    if (e.prompt.includes('agente Product Owner del') && e.prompt.includes('Gracias, queda claro')) return said('PASO')
+    if (e.prompt.includes('agente QA del') && e.prompt.includes('confirma con el PO')) return said('@po Gracias, queda claro.')
+    const role = /eres el agente ([^ ]+(?: [^ ]+)?) del/.exec(e.prompt)?.[1] ?? '?'
+    return said(`Aporte de ${role}.`)
+  })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'chat-grupo' })
+  const lines = async (pattern: RegExp) => (await ui.find({ type: 'Markdown', text: pattern })) !== undefined
+
+  // A decision: one agent acknowledges it, with what it is asked to bring.
+  picked = '@po: reconocer la decisión y decir el siguiente paso'
+  await ui.input({ key: 'entrada-grupo-0', text: 'Decidido: el login va con Google.' })
+  expect(picks[0]).toContain('Nunca una ronda de confirmaciones')
+  expect(prompts.length).toBe(1)
+  expect(prompts[0]).toContain('Lo que se espera de ti en este mensaje (una aportación de chat, no un entregable): reconocer la decisión y decir el siguiente paso.')
+  expect(prompts[0]).toContain('Ante una decisión del usuario')
+
+  // Two specialties with different parts: both answer, the second after the first.
+  picked = '@backend: el contrato de la API\n@frontend: los estados de la pantalla'
+  await ui.input({ key: 'entrada-grupo-1', text: '¿Qué falta para el login?' })
+  expect(prompts.length).toBe(3)
+  expect(prompts[1]).toContain('agente Backend del')
+  expect(prompts[2]).toContain('agente Frontend del')
+  expect(prompts[2]).toContain('Lo que se espera de ti en este mensaje (una aportación de chat, no un entregable): los estados de la pantalla.')
+  expect(prompts[2]).toContain('Backend: Aporte de Backend.')
+  expect(await lines(/Aporte de Frontend/)).toBe(true)
+
+  // Two who would say the same: the second sees the first and passes.
+  picked = '@qa: riesgos del login\n@reviewer: riesgos del login'
+  await ui.input({ key: 'entrada-grupo-2', text: '¿Qué riesgos ves?' })
+  expect(prompts.length).toBe(5)
+  expect(prompts[4]).toContain('agente Revisión de código del')
+  expect(await lines(/Aporte de QA/)).toBe(true)
+  expect(await lines(/^PASO$/)).toBe(false)
+
+  // A direct mention: only that agent, and it must answer.
+  await ui.input({ key: 'entrada-grupo-3', text: '@ux ¿cómo queda el botón?' })
+  expect(prompts.length).toBe(6)
+  expect(prompts[5]).toContain('agente Diseño UX/UI del')
+  expect(prompts[5]).not.toContain('PASO')
+
+  // An exchange already settled: QA thanks the PO, and the PO lets it end.
+  await ui.input({ key: 'entrada-grupo-4', text: '@qa confirma con el PO' })
+  expect(prompts.length).toBe(8)
+  expect(prompts[7]).toContain('la conversación puede terminar ahí')
+  expect(await lines(/Gracias, queda claro/)).toBe(true)
+
+  // Nothing asked: no one answers, and the chat says so quietly.
+  picked = 'NADIE'
+  await ui.input({ key: 'entrada-grupo-5', text: 'Vale, gracias' })
+  expect(prompts.length).toBe(8)
+  expect(await ui.find({ type: 'Text', text: /Nadie tenía nada que añadir/ })).toBeDefined()
+
+  // A question always gets someone, even when the pick says no one.
+  await ui.input({ key: 'entrada-grupo-6', text: '¿Y ahora?' })
+  expect(prompts.length).toBe(9)
+  expect(prompts[8]).toContain('agente Product Owner del')
+  expect(prompts[8]).toContain('pedirle la aclaración que haga falta')
+
+  // A failed pick is not "no one": the PO answers.
+  picked = null
+  await ui.input({ key: 'entrada-grupo-7', text: 'Revisad lo del login' })
+  expect(prompts.length).toBe(10)
+  expect(prompts[9]).toContain('agente Product Owner del')
+
+  // The pick reads further back than the last few lines.
+  expect(picks.at(-1)).toContain('Decidido: el login va con Google.')
+
+  // Without tools, no agent may claim to be editing or testing.
+  expect(prompts[9]).toContain('Nunca digas que estás editando, probando')
+  expect(prompts[9]).toContain('sugiere pedírselo a Claude')
+
+  // In an agent's own chat, it knows what was decided in the group.
+  await ui.press({ key: 'volver-abajo' })
+  await ui.press({ key: 'chat-qa-engineer' })
+  await ui.input({ key: 'entrada-qa-engineer-0', text: '¿Por dónde empiezas?' })
+  expect(prompts[10]).toContain('Lo último del chat de grupo')
+  expect(prompts[10]).toContain('Tú: Decidido: el login va con Google.')
+  await ui.unmount()
+})
+
+test('en una charla larga, lo que dijo el usuario se recuerda más tiempo', async ($, on) => {
+  const prompts: string[] = []
+  const usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
+  mock.store(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('model.fork', (_, e) => {
+    prompts.push(e.prompt)
+    return { value: { isAnswered: true as const, text: `Respuesta ${prompts.length}: ${'x'.repeat(3000)}`, usage } }
+  })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'chat-qa-engineer' })
+  for (const [n, text] of ['Decidido: sin contraseña.', 'Segunda', 'Tercera', 'Cuarta', 'Quinta'].entries()) {
+    await ui.input({ key: `entrada-qa-engineer-${n}`, text })
+  }
+  // The oldest answers are dropped, the person's first decision is not.
+  expect(prompts[4]).toContain('Tú: Decidido: sin contraseña.')
+  expect(prompts[4]).not.toContain('Respuesta 1:')
+  expect(prompts[4]).toContain('Respuesta 4:')
   await ui.unmount()
 })
 
