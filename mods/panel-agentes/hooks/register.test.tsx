@@ -550,6 +550,68 @@ test('el esfuerzo elegido, y parar o pausar a los agentes', async ($, on) => {
   await ui.unmount()
 })
 
+test('al reanudar, el trabajo que cortó la pausa sigue donde se quedó', async ($, on) => {
+  const fills: string[] = []
+  let count = 0
+  mock.store(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('agent.spawn', (_, e) => ({ model: 'test', agentId: e.resume?.agentId ?? `a${++count}` }))
+  on('tool.call', () => ({ result: {} }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('prompt.fill', (_, e) => {
+    fills.push(e.text)
+    return { isFilled: true }
+  })
+  const base = {
+    tool_use_id: 't',
+    prompt: 'Trabaja',
+    subagentType: 'agent-control-center:qa-engineer',
+    provider: PROVIDER,
+    parentModel: 'test',
+    background: false,
+    fork: false,
+  } as const
+  const toolOf = (agentId: string) => {
+    const fromAgent = { tool: 'Read', file_path: '/a.md', agentId } as const
+    return $.tool.call(fromAgent)
+  }
+
+  await $.agent.spawn({ ...base, description: 'Validar bloque 2' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  // Paused, QA is told to stop and say where it left off.
+  await ui.press({ key: 'pausa-todos' })
+  expect(await toolOf('a1')).toMatchObject({ deny: expect.stringContaining('dónde lo dejaste') })
+  await $.turn.complete({ answer: 'Validé los casos 1 a 4; faltan del 5 al 9.', durationMs: 1000, isAborted: false, turnId: 'u', agentId: 'a1', reason: 'answer' })
+  expect(await ui.find({ type: 'Text', text: /El equipo está en pausa/ })).toBeDefined()
+
+  // Resumed, its work goes back to the main session to go on from there.
+  await ui.press({ key: 'pausa-todos' })
+  expect(fills.length).toBe(1)
+  expect(fills[0]).toContain('Reanuda el trabajo que quedó en pausa')
+  expect(fills[0]).toContain('QA (agente a1), tarea «Validar bloque 2». Dónde lo dejó: Validé los casos 1 a 4; faltan del 5 al 9.')
+  expect(await ui.find({ type: 'Markdown', text: /te dejé la orden en la caja del chat principal/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Listo para seguir/ })).toBeDefined()
+
+  // Sent, the same agent goes on: its tools work again, and the notice goes.
+  await $.agent.spawn({ ...base, description: 'Validar bloque 2', resume: { agentId: 'a1' } })
+  expect(await toolOf('a1')).toMatchObject({ result: {} })
+  expect(await ui.find({ type: 'Markdown', text: /te dejé la orden/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /Listo para seguir/ })).toBeUndefined()
+
+  // A role paused on its own resumes the same way; with nothing cut short, no order.
+  await ui.press({ key: 'menu-qa-engineer' })
+  await ui.press({ key: 'pausa-qa-engineer' })
+  await $.turn.complete({ answer: 'Casos 5 y 6 hechos.', durationMs: 1000, isAborted: false, turnId: 'u', agentId: 'a1', reason: 'answer' })
+  await ui.press({ key: 'pausa-qa-engineer' })
+  expect(fills.length).toBe(2)
+  expect(fills[1]).toContain('Casos 5 y 6 hechos.')
+  await ui.press({ key: 'pausa-qa-engineer' })
+  await ui.press({ key: 'pausa-qa-engineer' })
+  expect(fills.length).toBe(2)
+  await ui.unmount()
+})
+
 test('las tarjetas caben en un panel estrecho', async ($, on) => {
   mock.store(on)
   const at = async (bodyColumns: number) => {
