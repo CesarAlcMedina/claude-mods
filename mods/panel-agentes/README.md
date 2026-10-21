@@ -4,6 +4,7 @@ Panel junto al chat para el Agent Control Center. Muestra qué agente está trab
 
 - **Equipo**: una mini tarjeta por cada uno de los ocho roles, en el orden del flujo. ● trabajando, ✓ entregó, ✗ falló, ○ libre.
 - **Modelo**: cada tarjeta tiene un selector (Predeterminado, Haiku, Sonnet u Opus). El agente usará ese modelo la próxima vez que trabaje, y la elección se guarda entre sesiones. Predeterminado deja el modelo que trae el agente.
+- **Chat**: cada tarjeta tiene un botón Chat para hablar con ese agente. Arriba está el **Chat de grupo** con todo el equipo: si nombras a alguien (`@po`, `@ba`, `@ux`, `@dev`, `@reviewer`, `@qa`, `@devops`, `@research`) contestan solo esos; si no nombras a nadie, se pregunta a los ocho y solo aparecen los que tienen algo útil que decir. Cada respuesta es un agente que trabaja, así que gasta uso de tu plan. Claude no ve estos chats. En el móvil el chat se lee pero no se escribe.
 - **Entregas**: cada informe terminado, con el modelo que usó, su duración y cuántas herramientas usó. Toca una entrega para leer el informe completo.
 - **Limpiar** vacía el panel.
 

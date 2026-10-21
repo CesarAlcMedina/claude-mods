@@ -99,3 +99,53 @@ test('el modelo elegido en la tarjeta se usa al lanzar el agente', async ($, on)
 
   expect(asked).toEqual(['opus', undefined])
 })
+
+// The kit answers a spawn the plugin makes itself without an agent id (one a
+// test hook "starts" is no started agent), so the answer arriving is not
+// exercised here: what is sent, to whom, and the waiting line are.
+test('el chat con un agente y el de grupo', async ($, on) => {
+  const prompts: { type: string; prompt: string }[] = []
+  mock.store(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('agent.spawn', (_, e) => {
+    // A spawn the plugin makes reaches the bottom as the Agent tool's input.
+    const raw = e as unknown as { subagent_type?: string }
+    prompts.push({ type: e.subagentType ?? raw.subagent_type ?? '', prompt: e.prompt })
+    return { model: 'test', agentId: `c${prompts.length}` }
+  })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'chat-qa-engineer' })
+  await ui.input({ key: 'entrada-qa-engineer', text: '¿Qué probarías primero?' })
+  expect(prompts[0]?.type).toBe('agent-control-center:qa-engineer')
+  expect(prompts[0]?.prompt).toContain('¿Qué probarías primero?')
+  expect(await ui.find({ type: 'Markdown', text: /Qué probarías/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /escribiendo/ })).toBeDefined()
+
+  // A second message carries the conversation so far.
+  await ui.input({ key: 'entrada-qa-engineer', text: '¿Y después?' })
+  expect(prompts[1]?.prompt).toContain('Tú: ¿Qué probarías primero?')
+
+  await ui.press({ key: 'volver' })
+  await ui.press({ key: 'chat-grupo' })
+
+  // Naming someone asks only them, and they must answer.
+  await ui.input({ key: 'entrada-grupo', text: '@po @dev ¿empezamos?' })
+  expect(prompts.slice(2).map(p => p.type)).toEqual([
+    'agent-control-center:product-owner',
+    'agent-control-center:software-engineer',
+  ])
+  expect(prompts[2]?.prompt).not.toContain('PASO')
+
+  // Naming nobody asks all eight, each free to stay quiet.
+  await ui.input({ key: 'entrada-grupo', text: 'Hola equipo' })
+  expect(prompts.length).toBe(12)
+  expect(prompts[4]?.prompt).toContain('PASO')
+  expect(prompts[4]?.prompt).toContain('chat de grupo')
+
+  // The chat on mobile is read only.
+  await ui.unmount()
+  const phone = await $.ui.mount({ ...PANE, surface: 'mobile' })
+  expect(await phone.find({ type: 'Text', text: /Para escribir/ })).toBeDefined()
+  await phone.unmount()
+})
