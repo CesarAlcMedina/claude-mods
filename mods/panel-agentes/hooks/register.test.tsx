@@ -145,21 +145,22 @@ test('el chat con un agente y el de grupo', async ($, on) => {
   expect(await ui.find({ key: 'chat-grupo' })).toBeDefined()
   await ui.press({ key: 'chat-grupo' })
 
-  // Naming someone asks only them, and they must answer.
+  // Naming someone asks only them, and they must answer; @dev is both engineers.
   await ui.input({ key: 'entrada-grupo-0', text: '@po @dev ¿empezamos?' })
-  expect(prompts.length).toBe(4)
+  expect(prompts.length).toBe(5)
   expect(prompts[2]).toContain('agente Product Owner')
-  expect(prompts[3]).toContain('agente Ingeniería')
+  expect(prompts[3]).toContain('agente Backend del')
+  expect(prompts[4]).toContain('agente Frontend del')
   expect(prompts[2]).not.toContain('PASO')
 
   // Naming nobody, a quick pick chooses who answers: two at most.
   await ui.input({ key: 'entrada-grupo-1', text: 'Hola equipo' })
   expect(picks.length).toBe(1)
   expect(picks[0]).toContain('Hola equipo')
-  expect(prompts.length).toBe(6)
-  expect(prompts[4]).toContain('agente Diseño UX/UI')
-  expect(prompts[5]).toContain('agente QA')
-  expect(prompts[4]).toContain('25 palabras como mucho')
+  expect(prompts.length).toBe(7)
+  expect(prompts[5]).toContain('agente Diseño UX/UI')
+  expect(prompts[6]).toContain('agente QA')
+  expect(prompts[5]).toContain('25 palabras como mucho')
   expect(await ui.find({ type: 'Markdown', text: /Respuesta de Diseño UX\/UI/ })).toBeDefined()
 
   // Emptying the chat clears its lines.
@@ -230,11 +231,12 @@ test('los agentes se escriben en el chat de grupo', async ($, on) => {
   expect(await ui.find({ type: 'Markdown', text: /^@po ¿qué priorizamos\?$/ })).toBeDefined()
   expect(await ui.find({ type: 'Markdown', text: /Primero el bloque 2/ })).toBeDefined()
 
-  // Agents who keep naming each other stop after a few hops.
+  // Agents who keep naming each other stop after a few hops and answers:
+  // QA asks both engineers (@dev), they ask QA back, and QA answers once more.
   await ui.input({ key: 'entrada-grupo-0', text: '@qa ¿cómo vas?' })
-  expect(prompts.length).toBe(5)
+  expect(prompts.length).toBe(6)
   expect(prompts[3]).toContain('Mensaje nuevo del agente QA')
-  expect(prompts[4]).toContain('No nombres a otros agentes')
+  expect(prompts[5]).toContain('No nombres a otros agentes')
   await ui.unmount()
 })
 

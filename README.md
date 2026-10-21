@@ -16,7 +16,7 @@ En la terminal:
 
 ## Mods
 
-- **agent-control-center**: ocho subagentes (PO, BA, UX/UI, Engineer, Reviewer, QA, DevOps, Research) y la skill `coordinador`. Ver [su README](mods/agent-control-center/README.md).
+- **agent-control-center**: nueve subagentes (PO, BA, UX/UI, Backend, Frontend, Reviewer, QA, DevOps, Research) y la skill `coordinador`. Ver [su README](mods/agent-control-center/README.md).
 - **panel-agentes**: panel junto al chat que muestra qué agente trabaja y qué entregó cada uno. Ver [su README](mods/panel-agentes/README.md).
 
 Este repositorio es privado: en tu PC tienes que tener acceso a GitHub con tu cuenta (por ejemplo `gh auth login`) para que Claude Code pueda descargarlo.

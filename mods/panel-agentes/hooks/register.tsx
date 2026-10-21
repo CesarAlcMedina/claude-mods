@@ -28,7 +28,8 @@ const TEAM: { role: string; label: string; aliases: string[]; job: string }[] = 
   { role: 'product-owner', label: 'Product Owner', aliases: ['po'], job: 'objetivos, valor de negocio, épicas, historias de usuario y prioridades' },
   { role: 'business-analyst', label: 'Analista de negocio', aliases: ['ba', 'analista'], job: 'requisitos funcionales y no funcionales, reglas de negocio y criterios de aceptación' },
   { role: 'ux-ui-designer', label: 'Diseño UX/UI', aliases: ['ux', 'ui', 'diseño'], job: 'flujos, wireframes, estados de los componentes y accesibilidad' },
-  { role: 'software-engineer', label: 'Ingeniería', aliases: ['dev', 'ingenieria', 'ingeniería'], job: 'diseño técnico, implementación y pruebas unitarias' },
+  { role: 'backend-engineer', label: 'Backend', aliases: ['backend', 'back', 'dev'], job: 'APIs, lógica de negocio, datos e integraciones del lado del servidor, con pruebas unitarias' },
+  { role: 'frontend-engineer', label: 'Frontend', aliases: ['frontend', 'front', 'dev'], job: 'componentes, pantallas, estilos, accesibilidad y consumo de APIs, con pruebas unitarias' },
   { role: 'code-reviewer', label: 'Revisión de código', aliases: ['reviewer', 'revision', 'revisión'], job: 'calidad, mantenibilidad, seguridad, rendimiento y errores lógicos del código' },
   { role: 'qa-engineer', label: 'QA', aliases: ['qa'], job: 'estrategia y planes de prueba, escenarios positivos, negativos y de borde, y defectos' },
   { role: 'devops-engineer', label: 'DevOps', aliases: ['devops'], job: 'CI/CD, Docker y automatización de builds y despliegues' },
@@ -38,8 +39,11 @@ const TEAM: { role: string; label: string; aliases: string[]; job: string }[] = 
 const roleOf = (subagentType: string) =>
   subagentType.startsWith(PREFIX) ? subagentType.slice(PREFIX.length) : subagentType
 
+// Roles the team no longer has, still named in runs and chats kept from before.
+const FORMER: Record<string, string> = { 'software-engineer': 'Ingeniería' }
+
 const labelOf = (role: string) =>
-  role === ME ? 'Tú' : (TEAM.find(one => one.role === role)?.label ?? role)
+  role === ME ? 'Tú' : (TEAM.find(one => one.role === role)?.label ?? FORMER[role] ?? role)
 
 const ICON: Record<RunStatus, string> = {
   trabajando: '●',
@@ -201,7 +205,8 @@ const ICONS: Record<string, string> = {
   'product-owner': '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6 8-6s8 2 8 6"/>',
   'business-analyst': '<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2M3 13h18M11 13v2h2v-2"/>',
   'ux-ui-designer': '<path d="M16 3l5 5L8 21H3v-5z"/><path d="M13 6l5 5"/>',
-  'software-engineer': '<path d="M9 18l-6-6 6-6M15 6l6 6-6 6"/>',
+  'backend-engineer': '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
+  'frontend-engineer': '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4M9 9l-2 2 2 2M15 9l2 2-2 2"/>',
   'code-reviewer': '<circle cx="11" cy="11" r="7"/><path d="M21 21l-5-5"/>',
   'qa-engineer': '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
   'devops-engineer': '<path d="M7 18a5 5 0 1 1 1-9.9A6 6 0 0 1 19 10a4 4 0 0 1-1 8"/><path d="M12 13v8M9 16l3-3 3 3"/>',
@@ -213,7 +218,8 @@ const GLYPHS: Record<string, string> = {
   'product-owner': '👤',
   'business-analyst': '💼',
   'ux-ui-designer': '✏️',
-  'software-engineer': '</>',
+  'backend-engineer': '🗄️',
+  'frontend-engineer': '🖥️',
   'code-reviewer': '🔍',
   'qa-engineer': '🛡️',
   'devops-engineer': '☁️',
