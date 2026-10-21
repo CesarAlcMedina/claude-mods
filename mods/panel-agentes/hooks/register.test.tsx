@@ -55,9 +55,10 @@ test('el panel muestra quién trabaja y qué entregó, en cada superficie', asyn
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect(await ui.find({ type: 'Text', text: /1 min 5 s · 1 herramientas/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Product Owner · 1 min 5 s/ })).toBeDefined()
+    // Opening a delivery shows its facts; Ver conversación the whole report.
     await ui.press({ key: 'a1' })
-    expect(await ui.find({ type: 'Text', text: /Como usuario quiero entrar/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /1 herramientas/ })).toBeDefined()
     await ui.press({ key: 'completo-a1' })
     expect(await ui.find({ type: 'Markdown', text: /Historias/ })).toBeDefined()
     await ui.press({ key: 'completo-a1' })
