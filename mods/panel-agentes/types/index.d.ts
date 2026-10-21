@@ -10,8 +10,6 @@ export type AgentRun = {
   lastTool?: string
   durationMs?: number
   report?: string
-  /** Started from the panel's chat: shown on its card, not under Entregas. */
-  isChat?: boolean
 }
 
 /** One line of a chat: a role's own channel, or `grupo` for the team's. */
@@ -21,8 +19,6 @@ export type ChatMessage = {
   /** `tu` for the person, else the role that wrote it. */
   from: string
   text: string
-  /** The agent answering it. */
-  agentId?: string
   /** True while the answer is on its way. */
   isPending?: boolean
 }

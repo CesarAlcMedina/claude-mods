@@ -21,15 +21,15 @@ const modelsShown = atom({ plugin: 'panel-agentes', key: 'models' } as const, {}
 
 // The team in the order the coordinador skill hands work along, with the
 // short names an @mention in the group chat may use.
-const TEAM: { role: string; label: string; aliases: string[] }[] = [
-  { role: 'product-owner', label: 'Product Owner', aliases: ['po'] },
-  { role: 'business-analyst', label: 'Analista de negocio', aliases: ['ba', 'analista'] },
-  { role: 'ux-ui-designer', label: 'Diseño UX/UI', aliases: ['ux', 'ui', 'diseño'] },
-  { role: 'software-engineer', label: 'Ingeniería', aliases: ['dev', 'ingenieria', 'ingeniería'] },
-  { role: 'code-reviewer', label: 'Revisión de código', aliases: ['reviewer', 'revision', 'revisión'] },
-  { role: 'qa-engineer', label: 'QA', aliases: ['qa'] },
-  { role: 'devops-engineer', label: 'DevOps', aliases: ['devops'] },
-  { role: 'research-agent', label: 'Investigación', aliases: ['research', 'investigacion', 'investigación'] },
+const TEAM: { role: string; label: string; aliases: string[]; job: string }[] = [
+  { role: 'product-owner', label: 'Product Owner', aliases: ['po'], job: 'objetivos, valor de negocio, épicas, historias de usuario y prioridades' },
+  { role: 'business-analyst', label: 'Analista de negocio', aliases: ['ba', 'analista'], job: 'requisitos funcionales y no funcionales, reglas de negocio y criterios de aceptación' },
+  { role: 'ux-ui-designer', label: 'Diseño UX/UI', aliases: ['ux', 'ui', 'diseño'], job: 'flujos, wireframes, estados de los componentes y accesibilidad' },
+  { role: 'software-engineer', label: 'Ingeniería', aliases: ['dev', 'ingenieria', 'ingeniería'], job: 'diseño técnico, implementación y pruebas unitarias' },
+  { role: 'code-reviewer', label: 'Revisión de código', aliases: ['reviewer', 'revision', 'revisión'], job: 'calidad, mantenibilidad, seguridad, rendimiento y errores lógicos del código' },
+  { role: 'qa-engineer', label: 'QA', aliases: ['qa'], job: 'estrategia y planes de prueba, escenarios positivos, negativos y de borde, y defectos' },
+  { role: 'devops-engineer', label: 'DevOps', aliases: ['devops'], job: 'CI/CD, Docker y automatización de builds y despliegues' },
+  { role: 'research-agent', label: 'Investigación', aliases: ['research', 'investigacion', 'investigación'], job: 'investigar tecnologías, documentación y buenas prácticas, con fuentes' },
 ]
 
 const roleOf = (subagentType: string) =>
@@ -155,12 +155,12 @@ const GLYPHS: Record<string, string> = {
 const svg = (body: string, size: number) =>
   `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="#c9ced6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`
 
-// The chat. Each message the person sends starts the agent afresh with the
-// conversation so far; in the group chat a role with nothing to add answers
-// PASS and is left out.
-const CHAT_TASK = 'Chat'
-// A chat spawn is named after the line that waits for its answer.
-const CHAT_NAME = 'chat-'
+// The chat. Each message is answered by the model speaking as the role, with
+// no tools: a spawned agent would start without a request of the person's,
+// which auto mode refuses. The answer forks the session's own conversation,
+// so it knows the project and what the team did; where there is nothing to
+// fork yet, a plain completion answers. In the group chat a role with
+// nothing to add answers PASS and is left out.
 const PASS = 'PASO'
 const HISTORY_CHARS = 8000
 
@@ -185,67 +185,87 @@ const transcript = (messages: ChatMessage[]) => {
   return text
 }
 
-const chatPrompt = (role: string, channel: string, history: ChatMessage[], text: string, mustAnswer: boolean) => {
+// What the panel knows of a role's own work this session.
+const workOf = (role: string, list: AgentRun[]) => {
+  const mine = list.filter(one => one.role === role)
+  if (mine.length === 0) return 'En esta sesión todavía no has trabajado en ninguna tarea.'
+  return mine
+    .slice(-3)
+    .map(run => {
+      const state =
+        run.status === 'trabajando'
+          ? `estás trabajando en ella ahora${run.lastTool ? ` (última herramienta: ${run.lastTool})` : ''}`
+          : `${STATUS_TEXT[run.status].toLowerCase()}${run.durationMs !== undefined ? ` en ${duration(run.durationMs)}` : ''}`
+      const summary = run.report ? ` Resumen de tu informe: ${summaryOf(run.report)}` : ''
+      return `- Tarea «${run.task}»: ${state}.${summary}`
+    })
+    .join('\n')
+}
+
+const chatPrompt = (role: string, channel: string, history: ChatMessage[], text: string, mustAnswer: boolean, work: string) => {
   const isGroup = channel === GROUP
+  const member = TEAM.find(one => one.role === role)
   const team = TEAM.map(one => `${one.label} (@${one.aliases[0]})`).join(', ')
   return [
+    `A partir de aquí no eres el asistente principal: eres el agente ${labelOf(role)} del Agent Control Center, que se ocupa de ${member?.job ?? 'su rol'}.`,
     isGroup
-      ? `Estás en el chat de grupo del panel de agentes con el usuario y todo el equipo: ${team}. Hablas como ${labelOf(role)}.`
-      : `Estás hablando con el usuario por el chat del panel de agentes. Hablas como ${labelOf(role)}.`,
-    'Responde en español, breve y en tono de conversación: unas pocas frases o una lista corta, desde tu rol.',
-    'No modifiques archivos ni ejecutes comandos que cambien nada, salvo que el usuario te lo pida claramente en su mensaje nuevo.',
+      ? `El usuario te escribe en el chat de grupo del panel de agentes, con todo el equipo: ${team}.`
+      : 'El usuario te escribe por tu chat en el panel de agentes.',
+    `Lo que has hecho en esta sesión:\n${work}`,
+    'Responde en español, breve y en tono de conversación: unas pocas frases o una lista corta, en primera persona y desde tu rol. Usa lo que sabes de la conversación y del proyecto. En este chat no tienes herramientas: si hace falta hacer algo, dilo y sugiere pedírselo a Claude.',
     isGroup && !mustAnswer
       ? `Si desde tu rol no tienes nada útil que aportar a este mensaje, responde solo con la palabra ${PASS}.`
       : '',
-    history.length > 0 ? `Conversación hasta ahora:\n\n${transcript(history)}` : '',
+    history.length > 0 ? `Chat hasta ahora:\n\n${transcript(history)}` : '',
     `Mensaje nuevo del usuario:\n\n${text}`,
   ]
     .filter(Boolean)
     .join('\n\n')
 }
 
+const answerAs = async ($: EngineInterface, role: string, prompt: string) => {
+  const forked = await $.model.fork({ prompt })
+  if (forked.isAnswered || forked.reason !== 'nothing-to-fork') return forked
+  const models = await readModels($)
+  return $.model.complete({ model: models[role] || models[ALL] || 'sonnet', prompt })
+}
+
 const send = async ($: EngineInterface, channel: string, text: string) => {
   const said = text.trim()
   if (said === '') return
   const history = (await read($, chat)).filter(one => one.channel === channel)
-  await update($, chat, list => [
-    ...list,
-    { id: crypto.randomUUID(), channel, from: ME, text: said },
-  ])
-
+  const list = await read($, runs)
   const { roles, isNamed } =
     channel === GROUP ? addressed(said) : { roles: [channel], isNamed: true }
   const waiting = roles.map(role => ({ role, id: crypto.randomUUID() }))
-  await update($, chat, list => [
-    ...list,
+  await update($, chat, lines => [
+    ...lines,
+    { id: crypto.randomUUID(), channel, from: ME, text: said },
     ...waiting.map(({ role, id }) => ({ id, channel, from: role, text: '', isPending: true })),
   ])
+
   await Promise.all(
     waiting.map(async ({ role, id }) => {
-      const started = await $.agent
-        .spawn({
-          subagentType: `${PREFIX}${role}`,
-          description: `${CHAT_TASK}: ${short(said, 40)}`,
-          name: `${CHAT_NAME}${id}`,
-          prompt: chatPrompt(role, channel, history, said, isNamed),
-        })
-        .catch((error: unknown) => ({ deny: String(error), agentId: undefined }))
-      if (started.deny === undefined) {
-        if (started.agentId !== undefined) await linkChat($, id, started.agentId)
-        return
-      }
-      await update($, chat, list =>
-        list.map(one =>
-          one.id === id ? { id, channel, from: role, text: `_No pude contestar: ${started.deny}._` } : one,
-        ),
+      const prompt = chatPrompt(role, channel, history, said, isNamed, workOf(role, list))
+      const reply = await answerAs($, role, prompt).catch((error: unknown) => ({
+        isAnswered: false as const,
+        reason: String(error),
+      }))
+      const answer = reply.isAnswered ? reply.text.trim() : ''
+      const isPass = answer === PASS || answer === `${PASS}.`
+      await update($, chat, lines =>
+        lines.flatMap(one => {
+          if (one.id !== id) return [one]
+          if (isPass) return []
+          const said = reply.isAnswered
+            ? answer || '_Sin respuesta._'
+            : `_No pude contestar (${reply.reason})._`
+          return [{ id, channel, from: role, text: said }]
+        }),
       )
     }),
   )
 }
-
-// Ties a waiting chat line to the agent that answers it.
-const linkChat = ($: EngineInterface, id: string, agentId: string) =>
-  update($, chat, list => list.map(one => (one.id === id ? { ...one, agentId } : one)))
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
@@ -285,11 +305,9 @@ export const register: Register = on => {
         status: 'trabajando',
         tools: 0,
         model: chosen ?? started.model,
-        isChat: e.description.startsWith(`${CHAT_TASK}: `),
       }
       await update($, runs, list => [...list, run].slice(-50))
     }
-    if (e.name?.startsWith(CHAT_NAME)) await linkChat($, e.name.slice(CHAT_NAME.length), id)
     void $.ui.open({ id: PANE, title: TITLE })
 
     return started
@@ -324,17 +342,6 @@ export const register: Register = on => {
               }
             : one,
         ),
-      )
-
-      const answer = e.answer.trim()
-      await update($, chat, list =>
-        list.flatMap(one => {
-          if (one.agentId !== agentId || !one.isPending) return [one]
-          if (answer === PASS || answer === `${PASS}.`) return []
-          const text =
-            status === 'entregado' ? answer || '_Sin respuesta._' : `_${STATUS_TEXT[status]}._`
-          return [{ id: one.id, channel: one.channel, from: one.from, text }]
-        }),
       )
     }
 
@@ -399,7 +406,7 @@ export const register: Register = on => {
           ))}
           {Input ? (
             <Input
-              key={`entrada-${showing}`}
+              key={`entrada-${showing}-${messages.length}`}
               placeholder={room}
               value=""
               submitLabel="enviar"
@@ -528,7 +535,7 @@ export const register: Register = on => {
       )
     })
 
-    const delivered = list.filter(one => one.status !== 'trabajando' && !one.isChat).reverse()
+    const delivered = list.filter(one => one.status !== 'trabajando' ).reverse()
     const recent = isAll ? delivered : delivered.slice(0, 3)
 
     const tabs: { id: TeamFilter; label: string; count: number; color: 'suggestion' | 'warning' | 'success' | 'inactive' }[] = [
