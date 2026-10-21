@@ -164,6 +164,20 @@ const PILL: Record<RunStatus | 'libre', { icon: string; text: string; color: 'wa
 
 const PAUSED_PILL = { icon: '⏸', text: 'En pausa', color: 'warning' } as const
 
+// The panel's dark palette, from the person's mockup.
+const TONE = {
+  card: '#1f2024',
+  border: '#34363c',
+  hover: '#4a4d55',
+  tile: '#2c2e33',
+  badge: '#2e3036',
+  workingCard: '#28241a',
+  workingBorder: '#6b5a2a',
+  doneTile: '#1f3a2b',
+  tabOn: '#2d2a40',
+  accent: '#b4a5ff',
+}
+
 // A delivery's title: its task without the role's own prefix ("BA: …").
 const titleOf = (run: AgentRun) => {
   const task = run.task.replace(/^[\p{L}/ ]{1,24}:\s*/u, '').trim() || run.task
@@ -528,9 +542,23 @@ export const register: Register = on => {
       ) : (
         <Text>{GLYPHS[name] ?? '•'}</Text>
       )
-    const tile = (name: string) => (
-      <Box borderStyle="round" borderColor="inactive" paddingX={1} alignSelf="flex-start" flexShrink={0}>
-        {icon(name)}
+    // The design's dark fills; the terminal keeps its own background.
+    const fill = (color: string) => (e.surface === 'terminal' ? undefined : color)
+    const tile = (name: string, size = 22) => (
+      <Box
+        backgroundColor={fill(TONE.tile)}
+        borderStyle={e.surface === 'terminal' ? 'round' : undefined}
+        borderColor="inactive"
+        paddingX={1}
+        alignSelf="flex-start"
+        flexShrink={0}
+      >
+        {icon(name, size)}
+      </Box>
+    )
+    const badge = (count: number) => (
+      <Box backgroundColor={fill(TONE.badge)} paddingX={1} flexShrink={0}>
+        <Text size="caption">{count}</Text>
       </Box>
     )
 
@@ -613,19 +641,22 @@ export const register: Register = on => {
       }).length,
       disponibles: TEAM.filter(m => stateOf(m.role).last === undefined).length,
     }
+    // Working first, then finished, then free, as the team's order has them.
+    const rank = (role: string) => {
+      const status = stateOf(role).last?.status
+      return status === 'trabajando' ? 0 : status !== undefined ? 1 : 2
+    }
     const shown = TEAM.filter(m => {
       const status = stateOf(m.role).last?.status
       if (tab === 'en-curso') return status === 'trabajando'
       if (tab === 'completados') return status !== undefined && status !== 'trabajando'
       if (tab === 'disponibles') return status === undefined
       return true
-    })
+    }).sort((x, y) => rank(x.role) - rank(y.role))
 
-    // Two cards a row only where each still fits its name beside its status;
-    // a narrower card puts the status under the name instead.
-    const perRow = width >= 70 ? 2 : 1
+    // Two cards a row only where each still fits its name.
+    const perRow = width >= 64 ? 2 : 1
     const cardWidth = Math.floor((width - (perRow - 1)) / perRow)
-    const isCompact = cardWidth < 36
 
     const picker = (key: string, value: string, options: { value: string; label: string }[], label: string, pick: (value: string) => unknown) =>
       Select ? (
@@ -649,64 +680,55 @@ export const register: Register = on => {
       const isWorking = status === 'trabajando'
       const isHalted = isWorking && mine.some(one => one.status === 'trabajando' && one.isHalted)
       const isOnPause = isPaused(onPause, member.role)
-      const pill = isOnPause && !isWorking ? PAUSED_PILL : PILL[status ?? 'libre']
+      const pill = isHalted
+        ? { icon: '●', text: 'Parando…', color: 'warning' as const }
+        : isOnPause && !isWorking
+          ? PAUSED_PILL
+          : PILL[status ?? 'libre']
       const own = models[member.role] ?? ''
       const ownEffort = efforts[member.role] ?? ''
-      const subtitle =
-        isHalted
-          ? 'Parando…'
-          : status === 'trabajando' && last
-          ? `${last.task}${last.lastTool ? ` · ${last.lastTool}` : ''}`
-          : status && last
-            ? `${STATUS_TEXT[status]}${last.durationMs !== undefined ? ` · ${duration(last.durationMs)}` : ''}`
-            : 'Listo para una nueva tarea'
-      const progress = status === 'trabajando' && last ? Math.min(0.9, 0.15 + last.tools / 40) : 0
-      const barWidth = Math.max(6, cardWidth - 12)
+      const took = !isWorking && last?.durationMs !== undefined ? duration(last.durationMs) : ''
+      const doing = isWorking && last && !isHalted ? `${last.task}${last.lastTool ? ` · ${last.lastTool}` : ''}` : ''
       return (
         <Box
           key={`tarjeta-${member.role}`}
-          flexDirection="row"
+          flexDirection="column"
           gap={1}
           width={cardWidth}
           borderStyle="round"
-          borderColor={status === 'trabajando' ? 'warning' : 'inactive'}
-          hover={{ borderColor: 'suggestion' }}
-          padding={1}
+          borderColor={isWorking ? TONE.workingBorder : TONE.border}
+          backgroundColor={fill(isWorking ? TONE.workingCard : TONE.card)}
+          hover={{ borderColor: isWorking ? 'warning' : TONE.hover }}
+          paddingX={1}
+          paddingY={1}
         >
-          {tile(member.role)}
-          <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} gap={1}>
-            <Box
-              flexDirection={isCompact ? 'column' : 'row'}
-              justifyContent="space-between"
-              alignItems={isCompact ? 'flex-start' : 'center'}
-              gap={1}
-            >
-              <Box flexShrink={1} minWidth={0}>
-                <Text bold wrap="truncate-end">
-                  {member.label}
-                  {mine.length > 1 ? ` ×${mine.length}` : ''}
-                </Text>
-              </Box>
-              <Box borderStyle="round" borderColor={pill.color} paddingX={1} flexShrink={0}>
-                <Text color={pill.color} size="caption" wrap="truncate-end">
-                  {pill.icon} {pill.text}
-                </Text>
-              </Box>
+          <Box flexDirection="row" gap={1} alignItems="center">
+            {tile(member.role, 16)}
+            <Box flexShrink={1} minWidth={0}>
+              <Text bold wrap="truncate-end">
+                {member.label}
+                {mine.length > 1 ? ` ×${mine.length}` : ''}
+              </Text>
             </Box>
-            <Text dimColor wrap="truncate-end">
-              {subtitle}
+          </Box>
+          <Box flexDirection="row" justifyContent="space-between" gap={1} paddingLeft={5}>
+            <Text color={pill.color === 'inactive' ? undefined : pill.color} dimColor={pill.color === 'inactive'} wrap="truncate-end">
+              <Text color={pill.color}>{pill.icon === '○' ? '●' : pill.icon}</Text> {pill.text}
             </Text>
-            {progress > 0 && (
-              <Box flexDirection="row" width={barWidth} backgroundColor="subtle">
-                <Box width={Math.max(1, Math.round(barWidth * progress))} backgroundColor="warning">
-                  <Text> </Text>
-                </Box>
-              </Box>
-            )}
-            <Box flexDirection="row" flexWrap="wrap" justifyContent="space-between" gap={1}>
-              <Button key={`chat-${member.role}`} plain onPress={() => update($, view, () => member.role)}>
-                Abrir chat →
-              </Button>
+            {took !== '' && <Text dimColor>{took}</Text>}
+          </Box>
+          {doing !== '' && (
+            <Box paddingLeft={5}>
+              <Text dimColor size="caption" wrap="truncate-end">
+                {doing}
+              </Text>
+            </Box>
+          )}
+          <Box flexDirection="row" flexWrap="wrap" justifyContent="space-between" alignItems="center" gap={1}>
+            <Button key={`chat-${member.role}`} plain onPress={() => update($, view, () => member.role)}>
+              <Text dimColor>Abrir chat ↗</Text>
+            </Button>
+            <Box flexDirection="row" gap={1}>
               {isWorking && !isHalted && (
                 <Button key={`parar-${member.role}`} plain onPress={() => halt($, member.role)}>
                   <Text color="error">■ Parar</Text>
@@ -717,178 +739,192 @@ export const register: Register = on => {
                 plain
                 onPress={() => update($, menu, now => (now === member.role ? null : member.role))}
               >
-                ⋯
+                <Text dimColor>⋯</Text>
               </Button>
             </Box>
-            {menuOf === member.role &&
-              picker(`modelo-${member.role}`, own, AGENT_MODELS, 'Modelo', value => setModel($, member.role, value))}
-            {menuOf === member.role &&
-              picker(`esfuerzo-${member.role}`, ownEffort, AGENT_EFFORTS, 'Esfuerzo', value => setEffort($, member.role, value))}
-            {menuOf === member.role && !isTeamPaused && (
-              <Button key={`pausa-${member.role}`} plain onPress={() => togglePause($, member.role)}>
-                {onPause.includes(member.role) ? '▶ Reanudar' : '⏸ Pausar'}
-              </Button>
-            )}
           </Box>
+          {menuOf === member.role && (
+            <Box flexDirection="column" gap={1}>
+              {picker(`modelo-${member.role}`, own, AGENT_MODELS, 'Modelo', value => setModel($, member.role, value))}
+              {picker(`esfuerzo-${member.role}`, ownEffort, AGENT_EFFORTS, 'Esfuerzo', value => setEffort($, member.role, value))}
+              {!isTeamPaused && (
+                <Button key={`pausa-${member.role}`} plain onPress={() => togglePause($, member.role)}>
+                  {onPause.includes(member.role) ? '▶ Reanudar' : '⏸ Pausar'}
+                </Button>
+              )}
+            </Box>
+          )}
         </Box>
       )
     })
 
-    const delivered = list.filter(one => one.status !== 'trabajando' ).reverse()
+    const delivered = list.filter(one => one.status !== 'trabajando').reverse()
     const recent = isAll ? delivered : delivered.slice(0, 3)
 
-    const tabs: { id: TeamFilter; label: string; count: number; color: 'suggestion' | 'warning' | 'success' | 'inactive' }[] = [
-      { id: 'todos', label: 'Todos', count: TEAM.length, color: 'suggestion' },
-      { id: 'en-curso', label: 'En curso', count: counts['en-curso'], color: 'warning' },
-      { id: 'completados', label: 'Completados', count: counts.completados, color: 'success' },
-      { id: 'disponibles', label: 'Disponibles', count: counts.disponibles, color: 'inactive' },
+    const tabs: { id: TeamFilter; label: string; count: number }[] = [
+      { id: 'todos', label: 'Todos', count: TEAM.length },
+      { id: 'en-curso', label: 'En curso', count: counts['en-curso'] },
+      { id: 'completados', label: 'Completados', count: counts.completados },
+      { id: 'disponibles', label: 'Disponibles', count: counts.disponibles },
     ]
 
     return (
       <Box flexDirection="column" gap={1}>
-        <Box flexDirection="row" gap={2} alignItems="center">
-          {tile('grupo')}
-          <Box flexDirection="column">
-            <Text bold size="title">
-              Agentes
-            </Text>
-            <Text dimColor>Tu equipo, en un solo lugar</Text>
-          </Box>
-        </Box>
-        <Box flexDirection="row" flexWrap="wrap" gap={2} alignItems="center">
-          <Button key="chat-grupo" variant="primary" onPress={() => update($, view, () => GROUP)}>
-            💬 Chat de grupo
-          </Button>
-          {counts['en-curso'] > 0 && (
-            <Button key="parar-todos" onPress={() => halt($)}>
-              <Text color="error">■ Parar todos</Text>
-            </Button>
-          )}
-          <Button key="pausa-todos" onPress={() => togglePause($, ALL)}>
-            {isTeamPaused ? '▶ Reanudar equipo' : '⏸ Pausar equipo'}
-          </Button>
-          <Text>
-            {TEAM.length} roles · <Text color="warning">●</Text> {counts['en-curso']} en curso ·{' '}
-            <Text color="success">●</Text> {counts.completados} completados ·{' '}
-            <Text color="inactive">●</Text> {counts.disponibles} disponibles
-          </Text>
-        </Box>
-
         <Box flexDirection="row" flexWrap="wrap" justifyContent="space-between" alignItems="center" gap={1}>
           <Box flexDirection="row" gap={1} alignItems="center">
             {icon('grupo', 18)}
-            <Text bold size="heading">
-              Equipo
+            <Text bold size="title">
+              Agentes
             </Text>
+            {badge(TEAM.length)}
           </Box>
-          <Box flexDirection="row" flexWrap="wrap" gap={1}>
-            {picker('modelo-todos', teamModel, MODELS, 'Modelo', value => setModel($, ALL, value))}
+          <Button key="chat-grupo" variant="primary" onPress={() => update($, view, () => GROUP)}>
+            Chat de grupo
+          </Button>
+        </Box>
+
+        <Box flexDirection="row" flexWrap="wrap" justifyContent="space-between" alignItems="center" gap={1}>
+          <Box flexDirection="row" flexWrap="wrap" alignItems="center" gap={2}>
+            {picker('modelo-todos', teamModel, MODELS, 'Modelo del equipo', value => setModel($, ALL, value))}
             {picker('esfuerzo-todos', teamEffort, EFFORTS, 'Esfuerzo', value => setEffort($, ALL, value))}
+          </Box>
+          <Box flexDirection="row" gap={1}>
+            {counts['en-curso'] > 0 && (
+              <Button key="parar-todos" plain onPress={() => halt($)}>
+                <Text color="error">■ Parar todos</Text>
+              </Button>
+            )}
+            <Button key="pausa-todos" plain onPress={() => togglePause($, ALL)}>
+              <Text dimColor={!isTeamPaused} color={isTeamPaused ? 'warning' : undefined}>
+                {isTeamPaused ? '▶ Reanudar equipo' : '⏸ Pausar equipo'}
+              </Text>
+            </Button>
           </Box>
         </Box>
         {isTeamPaused && (
           <Text color="warning">⏸ El equipo está en pausa: Claude no puede lanzar agentes hasta que lo reanudes.</Text>
         )}
-        <Box flexDirection="row" flexWrap="wrap" gap={2}>
-          {tabs.map(one => (
-            <Button key={`pestana-${one.id}`} plain onPress={() => update($, filter, () => one.id)}>
-              <Text bold={tab === one.id} underline={tab === one.id} color={tab === one.id ? 'suggestion' : undefined}>
-                {one.label}
-              </Text>{' '}
-              <Text color={one.color}>{one.count}</Text>
-            </Button>
-          ))}
+
+        <Box flexDirection="column">
+          <Box flexDirection="row" flexWrap="wrap" gap={1}>
+            {tabs.map(one => {
+              const isOn = tab === one.id
+              return (
+                <Box key={`pestana-caja-${one.id}`} backgroundColor={isOn ? fill(TONE.tabOn) : undefined} paddingX={1}>
+                  <Button key={`pestana-${one.id}`} plain onPress={() => update($, filter, () => one.id)}>
+                    <Text color={isOn ? TONE.accent : undefined} dimColor={!isOn} underline={isOn && e.surface === 'terminal'}>
+                      {one.label}
+                    </Text>{' '}
+                    <Text color={isOn ? TONE.accent : undefined} dimColor={!isOn}>
+                      {one.count}
+                    </Text>
+                  </Button>
+                </Box>
+              )
+            })}
+          </Box>
+          <Text color={TONE.border}>{'─'.repeat(Math.max(10, width))}</Text>
         </Box>
+
         <Box flexDirection="row" flexWrap="wrap" columnGap={1} rowGap={1}>
           {cards.length > 0 ? cards : <Text dimColor>Ningún agente en esta pestaña.</Text>}
         </Box>
 
-        <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+        <Box flexDirection="row" justifyContent="space-between" alignItems="center" marginTop={1}>
           <Box flexDirection="row" gap={1} alignItems="center">
-            {icon('entregas', 18)}
-            <Text bold size="heading">
-              Entregas recientes
-            </Text>
-            <Box borderStyle="round" borderColor="inactive" paddingX={1}>
-              <Text size="caption">{delivered.length}</Text>
-            </Box>
+            {icon('entregas', 16)}
+            <Text bold>Entregas recientes</Text>
+            {badge(delivered.length)}
           </Box>
-          {delivered.length > 3 && (
-            <Button key="ver-todas" plain onPress={() => update($, showAll, now => !now)}>
-              <Text color="suggestion">{isAll ? 'Ver menos ←' : 'Ver todas →'}</Text>
-            </Button>
-          )}
+          <Box flexDirection="row" gap={2}>
+            {delivered.length > 3 && (
+              <Button key="ver-todas" plain onPress={() => update($, showAll, now => !now)}>
+                <Text color={TONE.accent}>{isAll ? 'Ver menos' : 'Ver todas'}</Text>
+              </Button>
+            )}
+            {list.length > 0 && (
+              <Button
+                key="limpiar"
+                plain
+                onPress={async () => {
+                  await update($, runs, () => [])
+                  await update($, expanded, () => null)
+                  await update($, full, () => null)
+                }}
+              >
+                <Text dimColor>Limpiar</Text>
+              </Button>
+            )}
+          </Box>
         </Box>
         {delivered.length === 0 && <Text dimColor>Ningún agente ha entregado todavía.</Text>}
         {recent.map(run => {
           const isOpen = open === run.id
-          const facts = [
-            labelOf(run.role),
-            run.model ? modelLabel(run.model) : '',
-            run.effort ? `esfuerzo ${effortLabel(run.effort).toLowerCase()}` : '',
-            duration(run.durationMs),
-            `${run.tools} herramientas`,
-          ]
-            .filter(Boolean)
-            .join(' · ')
           const done = PILL[run.status]
+          const byline = [labelOf(run.role), duration(run.durationMs)].filter(Boolean).join(' · ')
+          const facts = [
+            run.model ? `Modelo: ${modelLabel(run.model)}` : '',
+            run.effort ? `Esfuerzo: ${effortLabel(run.effort)}` : '',
+            `${run.tools} herramientas`,
+          ].filter(Boolean)
           return (
             <Box
               key={`entrega-${run.id}`}
               flexDirection="column"
               borderStyle="round"
-              borderColor="inactive"
-              hover={{ borderColor: 'suggestion' }}
-              paddingX={1}
+              borderColor={TONE.border}
+              backgroundColor={fill(TONE.card)}
+              hover={{ borderColor: TONE.hover }}
             >
-              <Button
-                key={run.id}
-                plain
-                onPress={() => update($, expanded, now => (now === run.id ? null : run.id))}
-              >
-                <Text color={done.color}>{done.icon}</Text> <Text bold>{titleOf(run)}</Text>{' '}
-                <Text dimColor>{isOpen ? '▴' : '▾'}</Text>
-              </Button>
-              <Text dimColor wrap="truncate-end">
-                {'  '}
-                {facts}
-              </Text>
-              {isOpen && (
-                <Box flexDirection="column" borderStyle="round" borderColor="inactive" paddingX={1} marginTop={1}>
-                  <Text dimColor size="caption">
-                    RESUMEN
+              <Box flexDirection="row" gap={1} alignItems="center" paddingX={1} paddingY={1}>
+                <Box backgroundColor={fill(run.status === 'entregado' ? TONE.doneTile : TONE.tile)} paddingX={1} flexShrink={0}>
+                  <Text color={done.color}>{done.icon}</Text>
+                </Box>
+                <Box flexDirection="column" flexShrink={1} minWidth={0}>
+                  <Text bold wrap="truncate-end">
+                    {titleOf(run)}
                   </Text>
-                  <Text>{summaryOf(run.report)}</Text>
+                  <Text dimColor size="caption" wrap="truncate-end">
+                    {byline}
+                  </Text>
+                </Box>
+                <Button
+                  key={run.id}
+                  plain
+                  onPress={() => update($, expanded, now => (now === run.id ? null : run.id))}
+                >
+                  <Text dimColor>{isOpen ? '⌃' : '⌄'}</Text>
+                </Button>
+              </Box>
+              {isOpen && (
+                <Box flexDirection="column">
+                  <Text color={TONE.border}>{'─'.repeat(Math.max(10, width - 2))}</Text>
+                  <Box flexDirection="row" flexWrap="wrap" justifyContent="space-between" alignItems="center" gap={1} paddingX={1} paddingY={1}>
+                    <Box flexDirection="row" flexWrap="wrap" gap={3}>
+                      {facts.map(fact => (
+                        <Text key={`dato-${run.id}-${fact}`} dimColor size="caption">
+                          {fact}
+                        </Text>
+                      ))}
+                    </Box>
+                    <Button
+                      key={`completo-${run.id}`}
+                      plain
+                      onPress={() => update($, full, now => (now === run.id ? null : run.id))}
+                    >
+                      <Text color={TONE.accent}>{whole === run.id ? 'Ocultar conversación ⌃' : 'Ver conversación ↗'}</Text>
+                    </Button>
+                  </Box>
+                  {whole === run.id && (
+                    <Box paddingX={1} paddingBottom={1}>
+                      <Markdown text={run.report || '_Sin informe._'} />
+                    </Box>
+                  )}
                 </Box>
               )}
-              {isOpen && (
-                <Button
-                  key={`completo-${run.id}`}
-                  plain
-                  onPress={() => update($, full, now => (now === run.id ? null : run.id))}
-                >
-                  <Text color="suggestion">
-                    {whole === run.id ? 'Ocultar análisis completo ▴' : 'Leer análisis completo →'}
-                  </Text>
-                </Button>
-              )}
-              {isOpen && whole === run.id && <Markdown text={run.report || '_Sin informe._'} />}
             </Box>
           )
         })}
-        {list.length > 0 && (
-          <Button
-            key="limpiar"
-            dimColor
-            onPress={async () => {
-              await update($, runs, () => [])
-              await update($, expanded, () => null)
-              await update($, full, () => null)
-            }}
-          >
-            Limpiar
-          </Button>
-        )}
       </Box>
     )
   })
