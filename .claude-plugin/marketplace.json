@@ -6,11 +6,6 @@
   "description": "Mods personales de Claude Code de Eres",
   "plugins": [
     {
-      "name": "contador-herramientas",
-      "source": "./mods/contador-herramientas",
-      "description": "Cuenta las herramientas usadas en la sesión y lo muestra en la barra de estado, una franja y un panel"
-    },
-    {
       "name": "agent-control-center",
       "source": "./mods/agent-control-center",
       "description": "Ocho subagentes (PO, BA, UX/UI, Engineer, Reviewer, QA, DevOps, Research) coordinados por la skill coordinador"

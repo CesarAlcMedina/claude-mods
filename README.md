@@ -10,13 +10,11 @@ En la terminal:
 
 ```
 /plugin marketplace add CesarAlcMedina/claude-mods
-/plugin install contador-herramientas@claude-mods
 /plugin install agent-control-center@claude-mods
 ```
 
 ## Mods
 
-- **contador-herramientas**: muestra cuántas herramientas ha usado Claude en la sesión. Comandos `/contador` y `/reiniciar`.
 - **agent-control-center**: ocho subagentes (PO, BA, UX/UI, Engineer, Reviewer, QA, DevOps, Research) y la skill `coordinador`. Ver [su README](mods/agent-control-center/README.md).
 
 Este repositorio es privado: en tu PC tienes que tener acceso a GitHub con tu cuenta (por ejemplo `gh auth login`) para que Claude Code pueda descargarlo.
