@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, TurnStepInput } from 'claude-code'
 
 import type { AgentRun, ChatMessage, RunStatus, TeamFilter } from '../types'
 
@@ -18,6 +18,8 @@ const filter = atom({ plugin: 'panel-agentes', key: 'filter' } as const, 'todos'
 const menu = atom({ plugin: 'panel-agentes', key: 'menu' } as const, null)
 const showAll = atom({ plugin: 'panel-agentes', key: 'showAll' } as const, false)
 const modelsShown = atom({ plugin: 'panel-agentes', key: 'models' } as const, {})
+const effortsShown = atom({ plugin: 'panel-agentes', key: 'efforts' } as const, {})
+const paused = atom({ plugin: 'panel-agentes', key: 'paused' } as const, [])
 
 // The team in the order the coordinador skill hands work along, with the
 // short names an @mention in the group chat may use.
@@ -81,10 +83,28 @@ const modelLabel = (value: string) =>
   MODELS.find(one => one.value === value)?.label ??
   value
 
-const readModels = async ($: EngineInterface): Promise<Record<string, string>> => {
-  const value = await $.store.get(MODELS_KEY)
+// How hard each role's model thinks, chosen and kept the same way. It is set
+// on each model request of the agent's, where its model takes an effort.
+const EFFORTS_KEY = 'esfuerzos'
+const EFFORTS: { value: string; label: string }[] = [
+  { value: '', label: 'Predeterminado' },
+  { value: 'low', label: 'Bajo' },
+  { value: 'medium', label: 'Medio' },
+  { value: 'high', label: 'Alto' },
+  { value: 'xhigh', label: 'Muy alto' },
+  { value: 'max', label: 'Máximo' },
+]
+
+const AGENT_EFFORTS = [{ value: '', label: 'Como el equipo' }, ...EFFORTS.slice(1)]
+
+const effortLabel = (value: string) => EFFORTS.find(one => one.value === value)?.label ?? value
+
+const readChoices = async ($: EngineInterface, key: string): Promise<Record<string, string>> => {
+  const value = await $.store.get(key)
   return value !== null && typeof value === 'object' ? (value as Record<string, string>) : {}
 }
+
+const readModels = ($: EngineInterface) => readChoices($, MODELS_KEY)
 
 const setModel = async ($: EngineInterface, role: string, model: string) => {
   const models = { ...(await readModels($)) }
@@ -92,6 +112,38 @@ const setModel = async ($: EngineInterface, role: string, model: string) => {
   else models[role] = model
   await $.store.set(MODELS_KEY, models)
   await update($, modelsShown, () => models)
+}
+
+const setEffort = async ($: EngineInterface, role: string, effort: string) => {
+  const efforts = { ...(await readChoices($, EFFORTS_KEY)) }
+  if (effort === '') delete efforts[role]
+  else efforts[role] = effort
+  await $.store.set(EFFORTS_KEY, efforts)
+  await update($, effortsShown, () => efforts)
+}
+
+// Stopping. The panel cannot end an agent's loop, but it can refuse every
+// tool call the agent makes from then on, with a note telling it to wrap up:
+// it ends within a step or two. A role on pause is stopped the same way, and
+// a new agent of it is refused until the person resumes it.
+const HALT = 'El usuario paró a este agente desde el panel de agentes. No sigas trabajando: termina ya con un resumen breve de lo que hiciste y lo que falta.'
+
+const isPaused = (list: string[], role: string) => list.includes(ALL) || list.includes(role)
+
+const halt = ($: EngineInterface, role?: string) =>
+  update($, runs, list =>
+    list.map(one =>
+      one.status === 'trabajando' && (role === undefined || one.role === role)
+        ? { ...one, isHalted: true as const }
+        : one,
+    ),
+  )
+
+const togglePause = async ($: EngineInterface, role: string) => {
+  const now = await read($, paused)
+  const isOn = now.includes(role)
+  await update($, paused, list => (isOn ? list.filter(one => one !== role) : [...list, role]))
+  if (!isOn) await halt($, role === ALL ? undefined : role)
 }
 
 const STATUS_TEXT: Record<RunStatus, string> = {
@@ -109,6 +161,8 @@ const PILL: Record<RunStatus | 'libre', { icon: string; text: string; color: 'wa
   interrumpido: { icon: '■', text: 'Interrumpido', color: 'inactive' },
   libre: { icon: '○', text: 'Disponible', color: 'inactive' },
 }
+
+const PAUSED_PILL = { icon: '⏸', text: 'En pausa', color: 'warning' } as const
 
 // A delivery's title: its task without the role's own prefix ("BA: …").
 const titleOf = (run: AgentRun) => {
@@ -357,6 +411,8 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const kept = await readModels($)
     await update($, modelsShown, () => kept)
+    const keptEfforts = await readChoices($, EFFORTS_KEY)
+    await update($, effortsShown, () => keptEfforts)
     await $.command.register({
       name: 'panel-agentes',
       description: 'Abre el panel de agentes del Agent Control Center',
@@ -373,8 +429,16 @@ export const register: Register = on => {
 
   on('agent.spawn', async ($, e, next) => {
     const role = roleOf(e.subagentType)
-    const models = TEAM.some(one => one.role === role) ? await readModels($) : {}
+    const isMember = TEAM.some(one => one.role === role)
+    if (isMember && isPaused(await read($, paused), role)) {
+      return {
+        deny: `El usuario puso en pausa a ${labelOf(role)} desde el panel de agentes. No lo lances hasta que lo reanude; si hace falta, pregúntale.`,
+      }
+    }
+    const models = isMember ? await readModels($) : {}
+    const efforts = isMember ? await readChoices($, EFFORTS_KEY) : {}
     const chosen = models[role] || models[ALL] || undefined
+    const effort = efforts[role] || efforts[ALL] || undefined
     const started = await next(chosen ? { ...e, model: chosen } : e)
     if (started.deny !== undefined || started.agentId === undefined) return started
 
@@ -391,6 +455,7 @@ export const register: Register = on => {
         status: 'trabajando',
         tools: 0,
         model: chosen ?? started.model,
+        effort,
       }
       await update($, runs, list => [...list, run].slice(-50))
     }
@@ -402,6 +467,8 @@ export const register: Register = on => {
   on('tool.call', async ($, e, next) => {
     const agentId = e.agentId
     if (agentId !== undefined) {
+      const run = (await read($, runs)).find(one => one.id === agentId)
+      if (run?.isHalted) return { deny: HALT }
       await update($, runs, list =>
         list.map(one =>
           one.id === agentId ? { ...one, tools: one.tools + 1, lastTool: e.tool } : one,
@@ -410,6 +477,15 @@ export const register: Register = on => {
     }
 
     return next(e)
+  })
+
+  on('turn.step', async function* ($, e, next) {
+    const agentId = e.agentId
+    // A model that takes no effort has none here, and is sent none.
+    if (agentId === undefined || e.effort === undefined) return yield* next(e)
+    const run = (await read($, runs)).find(one => one.id === agentId)
+    const effort = run?.effort as TurnStepInput['effort']
+    return yield* next(effort ? { ...e, effort } : e)
   })
 
   on('turn.complete', async ($, e, next) => {
@@ -422,7 +498,7 @@ export const register: Register = on => {
           one.id === agentId
             ? {
                 ...one,
-                status,
+                status: one.isHalted ? 'interrumpido' : status,
                 durationMs: (one.durationMs ?? 0) + e.durationMs,
                 report: e.answer || one.report,
               }
@@ -520,6 +596,10 @@ export const register: Register = on => {
     const isAll = await read($, showAll)
     const models = await read($, modelsShown)
     const teamModel = models[ALL] ?? ''
+    const efforts = await read($, effortsShown)
+    const teamEffort = efforts[ALL] ?? ''
+    const onPause = await read($, paused)
+    const isTeamPaused = onPause.includes(ALL)
 
     const stateOf = (role: string) => {
       const mine = list.filter(one => one.role === role)
@@ -564,10 +644,16 @@ export const register: Register = on => {
     const cards = shown.map(member => {
       const { mine, last } = stateOf(member.role)
       const status = last?.status
-      const pill = PILL[status ?? 'libre']
+      const isWorking = status === 'trabajando'
+      const isHalted = isWorking && mine.some(one => one.status === 'trabajando' && one.isHalted)
+      const isOnPause = isPaused(onPause, member.role)
+      const pill = isOnPause && !isWorking ? PAUSED_PILL : PILL[status ?? 'libre']
       const own = models[member.role] ?? ''
+      const ownEffort = efforts[member.role] ?? ''
       const subtitle =
-        status === 'trabajando' && last
+        isHalted
+          ? 'Parando…'
+          : status === 'trabajando' && last
           ? `${last.task}${last.lastTool ? ` · ${last.lastTool}` : ''}`
           : status && last
             ? `${STATUS_TEXT[status]}${last.durationMs !== undefined ? ` · ${duration(last.durationMs)}` : ''}`
@@ -608,10 +694,15 @@ export const register: Register = on => {
                 </Box>
               </Box>
             )}
-            <Box flexDirection="row" justifyContent="space-between">
+            <Box flexDirection="row" justifyContent="space-between" gap={1}>
               <Button key={`chat-${member.role}`} plain onPress={() => update($, view, () => member.role)}>
                 Abrir chat →
               </Button>
+              {isWorking && !isHalted && (
+                <Button key={`parar-${member.role}`} plain onPress={() => halt($, member.role)}>
+                  <Text color="error">■ Parar</Text>
+                </Button>
+              )}
               <Button
                 key={`menu-${member.role}`}
                 plain
@@ -622,6 +713,13 @@ export const register: Register = on => {
             </Box>
             {menuOf === member.role &&
               picker(`modelo-${member.role}`, own, AGENT_MODELS, 'Modelo', value => setModel($, member.role, value))}
+            {menuOf === member.role &&
+              picker(`esfuerzo-${member.role}`, ownEffort, AGENT_EFFORTS, 'Esfuerzo', value => setEffort($, member.role, value))}
+            {menuOf === member.role && !isTeamPaused && (
+              <Button key={`pausa-${member.role}`} plain onPress={() => togglePause($, member.role)}>
+                {onPause.includes(member.role) ? '▶ Reanudar' : '⏸ Pausar'}
+              </Button>
+            )}
           </Box>
         </Box>
       )
@@ -652,6 +750,14 @@ export const register: Register = on => {
           <Button key="chat-grupo" variant="primary" onPress={() => update($, view, () => GROUP)}>
             💬 Chat de grupo
           </Button>
+          {counts['en-curso'] > 0 && (
+            <Button key="parar-todos" onPress={() => halt($)}>
+              <Text color="error">■ Parar todos</Text>
+            </Button>
+          )}
+          <Button key="pausa-todos" onPress={() => togglePause($, ALL)}>
+            {isTeamPaused ? '▶ Reanudar equipo' : '⏸ Pausar equipo'}
+          </Button>
           <Text>
             {TEAM.length} roles · <Text color="warning">●</Text> {counts['en-curso']} en curso ·{' '}
             <Text color="success">●</Text> {counts.completados} completados ·{' '}
@@ -666,8 +772,14 @@ export const register: Register = on => {
               Equipo
             </Text>
           </Box>
-          {picker('modelo-todos', teamModel, MODELS, 'Modelo', value => setModel($, ALL, value))}
+          <Box flexDirection="row" flexWrap="wrap" gap={1}>
+            {picker('modelo-todos', teamModel, MODELS, 'Modelo', value => setModel($, ALL, value))}
+            {picker('esfuerzo-todos', teamEffort, EFFORTS, 'Esfuerzo', value => setEffort($, ALL, value))}
+          </Box>
         </Box>
+        {isTeamPaused && (
+          <Text color="warning">⏸ El equipo está en pausa: Claude no puede lanzar agentes hasta que lo reanudes.</Text>
+        )}
         <Box flexDirection="row" flexWrap="wrap" gap={2}>
           {tabs.map(one => (
             <Button key={`pestana-${one.id}`} plain onPress={() => update($, filter, () => one.id)}>
@@ -704,6 +816,7 @@ export const register: Register = on => {
           const facts = [
             labelOf(run.role),
             run.model ? modelLabel(run.model) : '',
+            run.effort ? `esfuerzo ${effortLabel(run.effort).toLowerCase()}` : '',
             duration(run.durationMs),
             `${run.tools} herramientas`,
           ]

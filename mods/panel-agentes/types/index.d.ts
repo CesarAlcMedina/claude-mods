@@ -7,9 +7,13 @@ export type AgentRun = {
   status: RunStatus
   tools: number
   model?: string
+  /** The effort its model steps were sent with, when the panel chose one. */
+  effort?: string
   lastTool?: string
   durationMs?: number
   report?: string
+  /** Stopped from the panel: its tool calls are refused until it ends. */
+  isHalted?: true
 }
 
 /** One line of a chat: a role's own channel, or `grupo` for the team's. */
@@ -44,6 +48,10 @@ declare module 'claude-code' {
       showAll: boolean
       /** The models chosen, as `$.store` keeps them, for drawing. */
       models: Record<string, string>
+      /** The efforts chosen, as `$.store` keeps them, for drawing. */
+      efforts: Record<string, string>
+      /** The roles on pause, `*` for the whole team. */
+      paused: string[]
     }
   }
 }

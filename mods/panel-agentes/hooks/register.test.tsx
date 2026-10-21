@@ -222,3 +222,80 @@ test('los agentes se escriben en el chat de grupo', async ($, on) => {
   expect(prompts[5]).toContain('No nombres a otros agentes')
   await ui.unmount()
 })
+
+test('el esfuerzo elegido, y parar o pausar a los agentes', async ($, on) => {
+  const sent: (string | number | undefined)[] = []
+  let count = 0
+  mock.store(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: `a${++count}` }))
+  on('tool.call', () => ({ result: {} }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('turn.step', async function* (_, e) {
+    sent.push(e.effort)
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
+  })
+
+  const spawn = (role: string) =>
+    $.agent.spawn({
+      tool_use_id: 't',
+      prompt: 'Trabaja',
+      description: `Tarea de ${role}`,
+      subagentType: `agent-control-center:${role}`,
+      provider: PROVIDER,
+      parentModel: 'test',
+      background: false,
+      fork: false,
+    })
+  const step = async (agentId: string | undefined, effort?: 'medium') => {
+    for await (const _ of $.turn.step({ turnId: 'u', index: 0, model: 'm', effort, messageCount: 1, agentId })) {
+      // nothing streams from the mock
+    }
+  }
+  const toolOf = (agentId: string) => {
+    // A call from inside the subagent's loop carries its id.
+    const fromAgent = { tool: 'Read', file_path: '/a.md', agentId } as const
+    return $.tool.call(fromAgent)
+  }
+
+  // The team works on low, QA on high; a model without effort gets none.
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.select({ key: 'esfuerzo-todos', value: 'low' })
+  await ui.press({ key: 'menu-qa-engineer' })
+  await ui.select({ key: 'esfuerzo-qa-engineer', value: 'high' })
+  await spawn('qa-engineer')
+  await spawn('product-owner')
+  await step('a1', 'medium')
+  await step('a2', 'medium')
+  await step('a1')
+  await step(undefined, 'medium')
+  expect(sent).toEqual(['high', 'low', undefined, 'medium'])
+
+  // Stopping one refuses its tools; the other keeps going.
+  await ui.press({ key: 'parar-qa-engineer' })
+  expect(await ui.find({ type: 'Text', text: /Parando…/ })).toBeDefined()
+  expect(await toolOf('a1')).toMatchObject({ deny: expect.stringContaining('paró a este agente') })
+  expect(await toolOf('a2')).toMatchObject({ result: {} })
+  await $.turn.complete({ answer: 'Llevo la mitad.', durationMs: 1000, isAborted: false, turnId: 'u', agentId: 'a1', reason: 'answer' })
+  expect(await ui.find({ type: 'Text', text: /Interrumpido/ })).toBeDefined()
+
+  // Stopping all stops the PO too.
+  await ui.press({ key: 'parar-todos' })
+  expect(await toolOf('a2')).toMatchObject({ deny: expect.stringContaining('paró a este agente') })
+
+  // On pause, the team gets no new agents until resumed.
+  await ui.press({ key: 'pausa-todos' })
+  expect(await ui.find({ type: 'Text', text: /El equipo está en pausa/ })).toBeDefined()
+  expect(await spawn('qa-engineer')).toMatchObject({ deny: expect.stringContaining('en pausa') })
+  await ui.press({ key: 'pausa-todos' })
+  expect(await spawn('qa-engineer')).toMatchObject({ agentId: 'a3' })
+
+  // One role on pause: only it is refused.
+  await ui.press({ key: 'menu-product-owner' })
+  await ui.press({ key: 'pausa-product-owner' })
+  expect(await spawn('product-owner')).toMatchObject({ deny: expect.stringContaining('Product Owner') })
+  expect(await spawn('qa-engineer')).toMatchObject({ agentId: 'a4' })
+  await ui.press({ key: 'pausa-product-owner' })
+  expect(await spawn('product-owner')).toMatchObject({ agentId: 'a5' })
+  await ui.unmount()
+})
