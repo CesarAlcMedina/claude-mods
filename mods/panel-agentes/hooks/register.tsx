@@ -379,7 +379,11 @@ const summaryOf = (report?: string) => {
       .split(/\n\s*\n/)
       .map(part => part.replace(/^#+\s.*$/gm, '').trim())
       .find(part => part.length > 0) ?? ''
-  const plain = paragraph.replace(/[*_`>#]/g, '').replace(/\s+/g, ' ').trim()
+  const plain = paragraph
+    .replace(/^\s*(?:[-+]|\d+\.)\s+/gm, '')
+    .replace(/[*_`>#]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
   return plain === '' ? 'Sin informe.' : short(plain, 320)
 }
 
@@ -1760,7 +1764,9 @@ export const register: Register = on => {
               )
             })}
           </Box>
-          <Text color={TONE.border}>{'─'.repeat(Math.max(10, width))}</Text>
+          <Text color={TONE.border} wrap="truncate-end">
+            {'─'.repeat(Math.max(10, width))}
+          </Text>
         </Box>
 
         )}
@@ -1838,7 +1844,21 @@ export const register: Register = on => {
               </Box>
               {isOpen && (
                 <Box flexDirection="column">
-                  <Text color={TONE.border}>{'─'.repeat(Math.max(10, width - 2))}</Text>
+                  <Text color={TONE.border} wrap="truncate-end">
+                    {'─'.repeat(Math.max(10, width - 4))}
+                  </Text>
+                  <Box key={`resumen-${run.id}`} flexDirection="column" paddingX={1} paddingTop={1}>
+                    <Text dimColor size="caption">
+                      {run.isPaused || run.status === 'interrumpido' ? 'DÓNDE LO DEJÓ' : 'RESUMEN'}
+                    </Text>
+                    <Text>
+                      {run.report
+                        ? summaryOf(run.report)
+                        : run.status === 'interrumpido'
+                          ? 'No dejó informe: se paró antes de poder resumir lo que hizo.'
+                          : 'No dejó informe.'}
+                    </Text>
+                  </Box>
                   <Box flexDirection="row" flexWrap="wrap" justifyContent="space-between" alignItems="center" gap={1} paddingX={1} paddingY={1}>
                     <Box flexDirection="row" flexWrap="wrap" gap={3}>
                       {facts.map(fact => (
