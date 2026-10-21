@@ -104,52 +104,78 @@ test('el modelo elegido en la tarjeta se usa al lanzar el agente', async ($, on)
   expect(asked).toEqual(['opus', undefined])
 })
 
-// The kit answers a spawn the plugin makes itself without an agent id (one a
-// test hook "starts" is no started agent), so the answer arriving is not
-// exercised here: what is sent, to whom, and the waiting line are.
 test('el chat con un agente y el de grupo', async ($, on) => {
-  const prompts: { type: string; prompt: string }[] = []
+  const prompts: string[] = []
+  const usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
   mock.store(on)
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('agent.spawn', (_, e) => {
-    // A spawn the plugin makes reaches the bottom as the Agent tool's input.
-    const raw = e as unknown as { subagent_type?: string }
-    prompts.push({ type: e.subagentType ?? raw.subagent_type ?? '', prompt: e.prompt })
-    return { model: 'test', agentId: `c${prompts.length}` }
+  // The model answers as the role named in the prompt; the analyst passes.
+  on('model.fork', (_, e) => {
+    prompts.push(e.prompt)
+    if (e.prompt.includes('agente Analista de negocio') && e.prompt.includes('PASO')) {
+      return { value: { isAnswered: true as const, text: 'PASO', usage } }
+    }
+    const role = /eres el agente ([^ ]+(?: [^ ]+)?) del/.exec(e.prompt)?.[1] ?? '?'
+    return { value: { isAnswered: true as const, text: `Respuesta de ${role}.`, usage } }
   })
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'chat-qa-engineer' })
-  await ui.input({ key: 'entrada-qa-engineer', text: '¿Qué probarías primero?' })
-  expect(prompts[0]?.type).toBe('agent-control-center:qa-engineer')
-  expect(prompts[0]?.prompt).toContain('¿Qué probarías primero?')
-  expect(await ui.find({ type: 'Markdown', text: /Qué probarías/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /escribiendo/ })).toBeDefined()
+  await ui.input({ key: 'entrada-qa-engineer-0', text: '¿Qué estás haciendo?' })
+  expect(prompts[0]).toContain('eres el agente QA del')
+  expect(prompts[0]).toContain('¿Qué estás haciendo?')
+  expect(await ui.find({ type: 'Markdown', text: /Respuesta de QA/ })).toBeDefined()
 
-  // A second message carries the conversation so far.
-  await ui.input({ key: 'entrada-qa-engineer', text: '¿Y después?' })
-  expect(prompts[1]?.prompt).toContain('Tú: ¿Qué probarías primero?')
+  // A second message carries the chat so far, and the field starts empty.
+  expect((await ui.find({ key: 'entrada-qa-engineer-2' }))?.props).toMatchObject({ value: '' })
+  await ui.input({ key: 'entrada-qa-engineer-2', text: '¿Y después?' })
+  expect(prompts[1]).toContain('Tú: ¿Qué estás haciendo?')
+  expect(prompts[1]).toContain('QA: Respuesta de QA.')
 
   await ui.press({ key: 'volver' })
   await ui.press({ key: 'chat-grupo' })
 
   // Naming someone asks only them, and they must answer.
-  await ui.input({ key: 'entrada-grupo', text: '@po @dev ¿empezamos?' })
-  expect(prompts.slice(2).map(p => p.type)).toEqual([
-    'agent-control-center:product-owner',
-    'agent-control-center:software-engineer',
-  ])
-  expect(prompts[2]?.prompt).not.toContain('PASO')
+  await ui.input({ key: 'entrada-grupo-0', text: '@po @dev ¿empezamos?' })
+  expect(prompts.length).toBe(4)
+  expect(prompts[2]).toContain('agente Product Owner')
+  expect(prompts[3]).toContain('agente Ingeniería')
+  expect(prompts[2]).not.toContain('PASO')
 
-  // Naming nobody asks all eight, each free to stay quiet.
-  await ui.input({ key: 'entrada-grupo', text: 'Hola equipo' })
+  // Naming nobody asks all eight; one with nothing to add stays quiet.
+  await ui.input({ key: 'entrada-grupo-3', text: 'Hola equipo' })
   expect(prompts.length).toBe(12)
-  expect(prompts[4]?.prompt).toContain('PASO')
-  expect(prompts[4]?.prompt).toContain('chat de grupo')
+  expect(prompts[4]).toContain('chat de grupo')
+  expect(await ui.find({ type: 'Markdown', text: /PASO/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Markdown', text: /Respuesta de Diseño UX\/UI/ })).toBeDefined()
 
   // The chat on mobile is read only.
   await ui.unmount()
   const phone = await $.ui.mount({ ...PANE, surface: 'mobile' })
   expect(await phone.find({ type: 'Text', text: /Para escribir/ })).toBeDefined()
   await phone.unmount()
+})
+
+test('sin conversación que bifurcar, contesta el modelo elegido', async ($, on) => {
+  const asked: string[] = []
+  mock.store(on, { modelos: { 'qa-engineer': 'haiku' } })
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('model.fork', () => ({ value: { isAnswered: false as const, reason: 'nothing-to-fork' as const } }))
+  on('model.complete', (_, e) => {
+    asked.push(e.model)
+    return {
+      value: {
+        isAnswered: true as const,
+        text: 'Hola desde QA.',
+        usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      },
+    }
+  })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'chat-qa-engineer' })
+  await ui.input({ key: 'entrada-qa-engineer-0', text: 'Hola' })
+  expect(asked).toEqual(['haiku'])
+  expect(await ui.find({ type: 'Markdown', text: /Hola desde QA/ })).toBeDefined()
+  await ui.unmount()
 })
