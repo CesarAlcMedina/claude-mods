@@ -20,4 +20,6 @@ Instalar: `/plugin install agent-control-center --marketplace CesarAlcMedina/cla
 
 Uso: "Usa el Agent Control Center para…", `/agent-control-center:coordinador`, o un agente directo: "Usa product-owner para…". Para verlos, pregúntale a Claude «¿qué agentes tienes?».
 
+El coordinador también lleva dos recorridos: **Nueva función** (prepara historias, requisitos y criterios con PO, BA y QA, y luego pasa a desarrollo y a pruebas, corrigiendo lo que falle) y **Consultar avances** (pregunta «¿cómo va…?» y te dice qué está terminado, qué falta y si hay bloqueos, sin lanzar nada). Con el plugin panel-agentes, el Chat de grupo del panel le pasa los mensajes que no nombran a ningún agente.
+
 Los plugins no pueden traer permisos de `settings.json`. Para que Claude pida confirmación antes de push, release o `docker push` en un proyecto, copia `.claude/settings.json` de este repositorio al proyecto.

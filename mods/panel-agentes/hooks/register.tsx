@@ -23,6 +23,7 @@ const modelsShown = atom({ plugin: 'panel-agentes', key: 'models' } as const, {}
 const effortsShown = atom({ plugin: 'panel-agentes', key: 'efforts' } as const, {})
 const paused = atom({ plugin: 'panel-agentes', key: 'paused' } as const, [])
 const earlier = atom({ plugin: 'panel-agentes', key: 'earlier' } as const, false)
+const requests = atom({ plugin: 'panel-agentes', key: 'requests' } as const, [])
 
 // The team in the order the coordinador skill hands work along, with the
 // short names an @mention in the group chat may use.
@@ -44,8 +45,22 @@ const roleOf = (subagentType: string) =>
 // Roles the team no longer has, still named in runs and chats kept from before.
 const FORMER: Record<string, string> = { 'software-engineer': 'Ingeniería' }
 
+// The Coordinador is the main session itself, running agent-control-center's
+// coordinador skill: a subagent cannot launch others, so the flow is run
+// there, with the session's own permissions, and the panel hands it work
+// through the prompt box. In the group chat it takes every message that
+// names no agent.
+const COORD = 'coordinador'
+const SKILL = '/agent-control-center:coordinador'
+const FROM_PANEL = 'Nueva función pedida desde el panel de agentes'
+const ENGINEERS = ['backend-engineer', 'frontend-engineer', 'software-engineer']
+
 const labelOf = (role: string) =>
-  role === ME ? 'Tú' : (TEAM.find(one => one.role === role)?.label ?? FORMER[role] ?? role)
+  role === ME
+    ? 'Tú'
+    : role === COORD
+      ? 'Coordinador'
+      : (TEAM.find(one => one.role === role)?.label ?? FORMER[role] ?? role)
 
 const ICON: Record<RunStatus, string> = {
   trabajando: '●',
@@ -213,10 +228,12 @@ const ICONS: Record<string, string> = {
   'qa-engineer': '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
   'devops-engineer': '<path d="M7 18a5 5 0 1 1 1-9.9A6 6 0 0 1 19 10a4 4 0 0 1-1 8"/><path d="M12 13v8M9 16l3-3 3 3"/>',
   'research-agent': '<path d="M3 21h18M6 21v-6M11 21V9M16 21v-9M21 21V5"/>',
+  coordinador: '<circle cx="12" cy="12" r="9"/><path d="M15.5 8.5l-2 5-5 2 2-5z"/>',
   grupo: '<circle cx="9" cy="8" r="3.5"/><path d="M2 20c0-3.5 3-5.5 7-5.5s7 2 7 5.5"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18 14.8c2.4.7 4 2.4 4 5.2"/>',
   entregas: '<path d="M12 2l9 5v10l-9 5-9-5V7z"/><path d="M3 7l9 5 9-5M12 12v10"/>',
 }
 const GLYPHS: Record<string, string> = {
+  coordinador: '🧭',
   'product-owner': '👤',
   'business-analyst': '💼',
   'ux-ui-designer': '✏️',
@@ -287,27 +304,42 @@ const turnsOf = (text: string): Turn[] => {
   return turns
 }
 
-// Who answers a group message that names no one. A clear "no one" stands,
-// unless the person asked something; a pick that fails or names no one
-// usable still leaves one role to answer, the Product Owner, asked to answer
-// or to ask what is missing.
-const pick = async ($: EngineInterface, history: ChatMessage[], text: string): Promise<Turn[]> => {
+// What a group message that names no one is: a question on how the work
+// goes, a new function to build, or anything else, for which the Coordinador
+// consults the agents picked.
+type Kind = 'estado' | 'funcion' | 'otro'
+
+const kindOf = (text: string): Kind => {
+  const said = /TIPO:\s*(estado|funci[oó]n|otro)/i.exec(text)?.[1]?.toLowerCase()
+  return said === 'estado' ? 'estado' : said?.startsWith('funci') ? 'funcion' : 'otro'
+}
+
+// What the message is, and whom the Coordinador consults. A clear "no one"
+// stands, unless the person asked something; a pick that fails or names no
+// one usable still leaves one role to consult, the Product Owner, asked to
+// answer or to ask what is missing.
+const pick = async (
+  $: EngineInterface,
+  history: ChatMessage[],
+  text: string,
+): Promise<{ kind: Kind; turns: Turn[] }> => {
   const team = TEAM.map(one => `@${one.aliases[0]}: ${one.label}, ${one.job}`).join('\n')
   const prompt = [
-    'Decides quién contesta en el chat de grupo de un equipo de agentes de software. Cada respuesta pide atención al usuario: elige por la aportación concreta que necesita el mensaje, no solo por la especialidad.',
+    'Clasificas los mensajes del chat de grupo de un equipo de agentes de software y decides a quién consulta el Coordinador. Cada consulta cuesta: elige por la aportación concreta que necesita el mensaje, no solo por la especialidad.',
     `El equipo:\n${team}`,
     history.length > 0
       ? `Chat hasta ahora (fíjate en lo que sigue pendiente: preguntas sin contestar, decisiones a medias):\n\n${transcript(history, PICK_CHARS)}`
       : '',
     `Mensaje nuevo del usuario:\n\n${text}`,
     [
-      'Reglas:',
+      'Primero, qué es el mensaje: «TIPO: estado» si pregunta cómo va un trabajo, qué falta o si algo está hecho; «TIPO: funcion» si pide construir, añadir o cambiar una funcionalidad del producto; «TIPO: otro» para todo lo demás (preguntas, opiniones, decisiones, saludos).',
+      'Después, solo para TIPO: otro, a quién consultar:',
       '- Lo normal es un solo agente. Elige un segundo solo si aporta algo distinto que el primero no puede dar: otra parte de la respuesta, otra evidencia, otro riesgo. Que dos roles tengan que ver con el tema no significa que deban contestar los dos.',
-      '- Si el usuario comunica una decisión o confirma algo, basta con que la reconozca un agente: el que tiene que actuar o el que tiene algo que añadir. Nunca una ronda de confirmaciones.',
+      '- Si el usuario comunica una decisión o confirma algo, elige uno solo: el que tiene que actuar o el que tiene algo que añadir. Nunca una ronda de confirmaciones.',
       '- Una pregunta del usuario siempre necesita a alguien que la conteste o pida la aclaración que falte.',
       `- Si el mensaje no pide nada (un gracias, un vale) o el usuario cierra la conversación, responde solo ${NOBODY}, aunque quede algo pendiente: se retoma cuando vuelva.`,
       '- Lo que pides a cada uno es una aportación de chat, no una tarea ni un entregable: dilo en pocas palabras. Ante una decisión, pide reconocerla y, si lo hay, el siguiente paso o un riesgo; nunca que rehaga requisitos, planes o documentos.',
-      `Responde solo con una línea por agente, ${PICKED} como mucho y el más necesario primero, así: @alias: lo concreto que debe aportar. O solo ${NOBODY}.`,
+      `Responde solo con la línea TIPO y, si es otro, una línea por agente, ${PICKED} como mucho y el más necesario primero, así: @alias: lo concreto que debe aportar. O, en lugar de los agentes, ${NOBODY}.`,
     ].join('\n'),
   ]
     .filter(Boolean)
@@ -315,12 +347,17 @@ const pick = async ($: EngineInterface, history: ChatMessage[], text: string): P
   const reply = await $.model
     .complete({ model: 'haiku', prompt, effort: 'low' })
     .catch(() => ({ isAnswered: false as const }))
-  const said = reply.isAnswered ? reply.text.trim() : ''
+  const answer = reply.isAnswered ? reply.text.trim() : ''
+  const kind = kindOf(answer)
+  const said = answer.replace(/^.*TIPO:.*$/im, '').trim()
   const turns = turnsOf(said).slice(0, PICKED)
-  if (turns.length > 0) return turns
+  if (kind !== 'otro' || turns.length > 0) return { kind, turns }
   const isNobody = said.replace(/[\s.*_]/g, '').toUpperCase() === NOBODY
-  if (isNobody && !isQuestion(text)) return []
-  return [{ role: 'product-owner', aim: 'contestar al usuario o pedirle la aclaración que haga falta', mustAnswer: true }]
+  if (isNobody && !isQuestion(text)) return { kind, turns: [] }
+  return {
+    kind,
+    turns: [{ role: 'product-owner', aim: 'contestar al usuario o pedirle la aclaración que haga falta', mustAnswer: true }],
+  }
 }
 
 // A chat as text, in at most max characters. Over the limit the oldest
@@ -379,7 +416,7 @@ const VOICE = [
 const TRUTH = [
   'Qué puedes afirmar:',
   '- En este chat no tienes herramientas: no lees ni cambias archivos y no ejecutas nada. Nunca digas que estás editando, probando, revisando el código o incorporando cambios, ni que lo vas a hacer ahora.',
-  '- Distingue lo que recomiendas, lo que ya está hecho (solo si aparece en tu trabajo de esta sesión o en la conversación) y lo que falta ejecutar. Para lo que hay que ejecutar, dilo y sugiere pedírselo a Claude en el chat principal.',
+  '- Distingue lo que recomiendas, lo que ya está hecho (solo si aparece en tu trabajo de esta sesión o en la conversación) y lo que falta ejecutar. Si te piden ejecutar algo, o alguien podría creer que ya está hecho, dilo y sugiere pedírselo a Claude en el chat principal; no lo añadas como coletilla a cada respuesta.',
 ].join('\n')
 
 type Prompt = {
@@ -393,9 +430,11 @@ type Prompt = {
   turn: Turn
   canReach: boolean
   work: string
+  /** Asked by the Coordinador, who answers the person with what it gathers. */
+  isConsulted?: boolean
 }
 
-const chatPrompt = ({ role, channel, group, before, message, since, turn, canReach, work }: Prompt) => {
+const chatPrompt = ({ role, channel, group, before, message, since, turn, canReach, work, isConsulted }: Prompt) => {
   const isGroup = channel === GROUP
   const member = TEAM.find(one => one.role === role)
   const team = TEAM.map(one => `${one.label} (@${one.aliases[0]})`).join(', ')
@@ -412,9 +451,11 @@ const chatPrompt = ({ role, channel, group, before, message, since, turn, canRea
       : `Si el mensaje ya no te pide nada (solo confirma, agradece o cierra el tema), o lo que ibas a decir ya está dicho, responde solo con la palabra ${PASS}: la conversación puede terminar ahí.`
   return [
     `A partir de aquí no eres el asistente principal: eres el agente ${labelOf(role)} del Agent Control Center, que se ocupa de ${member?.job ?? 'su rol'}.`,
-    isGroup
-      ? `Estás en el chat de grupo del panel de agentes, con el usuario y todo el equipo: ${team}.`
-      : 'Estás en tu chat con el usuario en el panel de agentes.',
+    isConsulted
+      ? 'El Coordinador te consulta por un mensaje del usuario en el chat de grupo del panel de agentes, y le contestará con lo que reúna: dale solo tu aportación, sin dirigirte al usuario ni saludar.'
+      : isGroup
+        ? `Estás en el chat de grupo del panel de agentes, con el usuario y todo el equipo: ${team}.`
+        : 'Estás en tu chat con el usuario en el panel de agentes.',
     `Lo que has hecho en esta sesión:\n${work}`,
     VOICE,
     isGroup
@@ -466,18 +507,185 @@ const send = async ($: EngineInterface, channel: string, text: string) => {
   await update($, chat, lines => [...lines, message])
   await follow($, channel)
   const named = channel === GROUP ? addressed(said) : { roles: [channel], isNamed: true }
+  if (!named.isNamed) return coordinate($, channel, history, message)
   // Whoever the person names must answer.
-  const turns = named.isNamed
-    ? named.roles.map(role => ({ role, mustAnswer: true }))
-    : await pick($, history, said)
-  if (turns.length === 0) {
-    await update($, chat, lines => [
-      ...lines,
-      { id: crypto.randomUUID(), channel, from: NOTE, text: 'Nadie tenía nada que añadir.', isNote: true as const },
-    ])
-    return
-  }
+  const turns = named.roles.map(role => ({ role, mustAnswer: true }))
   await ask($, channel, turns, message, 0, { left: RELAYS })
+}
+
+// The Coordinador's answer to a group message that names no one. Asking how
+// the work goes only reads what the panel and the session hold; a new
+// function is handed to the main session; anything else, it asks the agents
+// it needs and answers with what they bring, once.
+const coordinate = async ($: EngineInterface, channel: string, history: ChatMessage[], message: ChatMessage) => {
+  const id = crypto.randomUUID()
+  await update($, chat, all => [...all, { id, channel, from: COORD, text: '', isPending: true }])
+  await follow($, channel)
+  const { kind, turns } = await pick($, history, message.text)
+  const text =
+    kind === 'estado'
+      ? await report($, history, message)
+      : kind === 'funcion'
+        ? await handOff($, message.text)
+        : await gather($, history, message, turns)
+  await update($, chat, all =>
+    all.flatMap(one => {
+      if (one.id !== id) return [one]
+      if (text === null) {
+        return [{ id, channel, from: NOTE, text: 'Nadie tenía nada que añadir.', isNote: true as const }]
+      }
+      return [{ id, channel, from: COORD, text }]
+    }),
+  )
+  await follow($, channel)
+}
+
+const say = async ($: EngineInterface, role: string, prompt: string) => {
+  const reply = await answerAs($, role, prompt).catch((error: unknown) => ({
+    isAnswered: false as const,
+    reason: String(error),
+  }))
+  return reply.isAnswered ? reply.text.trim() || '_Sin respuesta._' : `_No pude contestar (${reply.reason})._`
+}
+
+const COORD_ROLE =
+  'A partir de aquí no eres el asistente principal: eres el Coordinador del Agent Control Center, en el chat de grupo del panel de agentes. Recibes los mensajes del usuario que no nombran a ningún agente.'
+
+// The states a piece of work can be in, as the panel knows them.
+const STATE: Record<RunStatus, string> = {
+  trabajando: 'iniciado, trabaja en ello ahora',
+  entregado: 'terminado, entregó su informe',
+  fallo: 'bloqueado, falló antes de entregar',
+  interrumpido: 'interrumpido antes de terminar',
+}
+
+// What the panel can vouch for: the last function asked from it, and the
+// agents that started since (or this session's, with none asked). An agent
+// still working is not asked how it goes, which would take it off its task:
+// what it last wrote is read instead.
+const facts = async ($: EngineInterface) => {
+  const list = await read($, runs)
+  const asked = (await read($, requests)).at(-1)
+  const scope = asked ? list.filter(one => (one.startedAt ?? 0) >= asked.at) : list.slice(-12)
+  const lines: string[] = []
+  if (asked) {
+    lines.push(
+      `Última función pedida desde el panel: «${asked.goal}», hace ${duration(Date.now() - asked.at)}. ${
+        asked.isSent ? 'La orden llegó a la sesión principal.' : 'No consta que la orden se enviara en la sesión principal.'
+      }`,
+    )
+  }
+  if (scope.length === 0) {
+    lines.push(asked ? 'Desde entonces no ha empezado ningún agente.' : 'El panel no tiene registrado ningún agente en esta sesión.')
+  }
+  for (const run of scope) {
+    const took = run.durationMs !== undefined ? ` (${duration(run.durationMs)})` : ''
+    let line = `- ${labelOf(run.role)}, tarea «${run.task}»: ${STATE[run.status]}${took}, ${run.tools} herramientas.`
+    if (run.status === 'trabajando') {
+      const seen = await $.session.messages({ agentId: run.id }).catch(() => ({ deny: 'error' }))
+      const last = Array.isArray(seen)
+        ? seen.filter(one => one.role === 'assistant' && one.text.trim() !== '').at(-1)?.text
+        : undefined
+      line += last ? ` Lo último que escribió: «${short(last, 400)}»` : ' No se pudo leer lo que lleva hecho.'
+      if (run.lastTool) line += ` Última herramienta: ${run.lastTool}.`
+    } else if (run.report) {
+      line += ` Resumen de su informe: ${summaryOf(run.report)}`
+    }
+    lines.push(line)
+  }
+  const builds = scope.filter(one => ENGINEERS.includes(one.role))
+  if (builds.length > 0) {
+    const built = Math.max(...builds.map(one => one.startedAt ?? 0))
+    const checked = scope.some(
+      one => one.role === 'qa-engineer' && one.status === 'entregado' && (one.startedAt ?? 0) > built,
+    )
+    lines.push(
+      checked && builds.every(one => one.status === 'entregado')
+        ? 'QA entregó después del desarrollo: su resumen dice si las pruebas pasan.'
+        : 'No consta ninguna entrega de QA posterior al desarrollo: nada está verificado.',
+    )
+  }
+  return lines.join('\n')
+}
+
+const report = async ($: EngineInterface, history: ChatMessage[], message: ChatMessage) => {
+  const known = await facts($)
+  const prompt = [
+    `${COORD_ROLE} Ahora el usuario pregunta cómo va el trabajo. Solo informas: no lanzas agentes, no retomas tareas y no prometes trabajo.`,
+    `Datos que el panel acaba de comprobar:\n${known}`,
+    'También ves la conversación principal con Claude: úsala para saber qué se pidió y a quién, y di cuándo algo viene de ahí y no de los datos del panel.',
+    [
+      'Cómo respondes:',
+      '- Identifica la tarea por la que pregunta y a sus responsables. Si no está claro de cuál habla, di de cuál informas.',
+      '- Di qué está terminado, qué queda pendiente y si hay algún bloqueo, en pocas frases o una lista corta.',
+      '- Usa los estados con su sentido exacto: solicitado (se pidió y no consta que haya empezado), iniciado (un agente trabaja en ello ahora), terminado (el agente entregó), verificado (QA lo probó después del desarrollo y su informe dice que pasa). No llames verificado a nada que no cumpla eso.',
+      '- Lo que no se pueda confirmar con estos datos, dilo claramente; no lo supongas.',
+    ].join('\n'),
+    VOICE,
+    TRUTH,
+    history.length > 0 ? `Chat hasta ahora:\n\n${transcript(history)}` : '',
+    `Pregunta del usuario:\n\n${message.text}`,
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+  return say($, COORD, prompt)
+}
+
+// A new function goes to the main session, which runs the flow with the
+// coordinador skill and launches each agent for real. The panel leaves the
+// order in the prompt box: the person's own Enter sends it, so it runs as
+// their request, with the permissions they already have.
+const handOff = async ($: EngineInterface, goal: string) => {
+  await update($, requests, list => [...list, { id: crypto.randomUUID(), goal, at: Date.now() }].slice(-10))
+  const order = `${SKILL} ${FROM_PANEL}: «${goal}». Sigue el recorrido «Nueva función» de la skill.`
+  const filled = await $.prompt.fill({ text: order }).catch(() => ({ isFilled: false }))
+  return filled.isFilled
+    ? 'Lo llevo al flujo del equipo. Te dejé la orden en la caja del chat principal: envíala con Enter y empiezo con Product Owner, análisis de negocio y QA, según haga falta, para tener historias, requisitos y criterios de aceptación. Después pasa a desarrollo y a pruebas. Verás a cada agente en su tarjeta, y aquí puedes preguntarme «¿cómo va?».'
+    : `Lo llevo al flujo del equipo, pero no pude dejar la orden en la caja del chat principal. Envíala tú allí:\n\n\`\`\`\n${order}\n\`\`\``
+}
+
+// Anything else: the agents picked answer the Coordinador in turn, each
+// seeing what the one before said, and it answers the person once.
+const gather = async ($: EngineInterface, history: ChatMessage[], message: ChatMessage, turns: Turn[]) => {
+  if (turns.length === 0) return null
+  const list = await read($, runs)
+  const heard: ChatMessage[] = []
+  for (const turn of turns) {
+    const prompt = chatPrompt({
+      role: turn.role,
+      channel: GROUP,
+      group: [],
+      before: history,
+      message,
+      since: heard,
+      turn: { ...turn, mustAnswer: heard.length === 0 },
+      canReach: false,
+      work: workOf(turn.role, list),
+      isConsulted: true,
+    })
+    const reply = await answerAs($, turn.role, prompt).catch(() => ({ isAnswered: false as const }))
+    const text = reply.isAnswered ? reply.text.trim() : ''
+    if (text !== '' && !isPass(text)) heard.push({ id: crypto.randomUUID(), channel: GROUP, from: turn.role, text })
+  }
+  const asked = turns.map(turn => labelOf(turn.role)).join(' y ')
+  const prompt = [
+    `${COORD_ROLE} Consultas solo a quien hace falta y contestas tú, con una sola respuesta.`,
+    heard.length > 0
+      ? `Por este mensaje consultaste a ${asked}. Sus aportaciones:\n\n${transcript(heard)}`
+      : `Por este mensaje consultaste a ${asked}, y nadie tenía nada nuevo que aportar.`,
+    [
+      'Cómo respondes:',
+      '- Reúne las aportaciones en una respuesta clara y natural, más corta que lo que te dieron: quédate con lo esencial, sin repetir ideas ni añadir lo que no dijeron, y ofrece el detalle si lo quiere. Nombra a un rol solo cuando ayude, por ejemplo para atribuir un riesgo o una decisión.',
+      '- Si nadie aportó, contesta tú con lo que sabes, o pide la aclaración que falte.',
+    ].join('\n'),
+    VOICE,
+    TRUTH,
+    history.length > 0 ? `Chat hasta ahora:\n\n${transcript(history)}` : '',
+    `Mensaje nuevo del usuario:\n\n${message.text}`,
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+  return say($, COORD, prompt)
 }
 
 const openChat = async ($: EngineInterface, channel: string) => {
@@ -614,6 +822,7 @@ export const register: Register = on => {
         tools: 0,
         model: chosen ?? started.model,
         effort,
+        startedAt: Date.now(),
       }
       await update($, runs, list => [...list, run].slice(-50))
     }
@@ -634,6 +843,16 @@ export const register: Register = on => {
       )
     }
 
+    return next(e)
+  })
+
+  // The Coordinador's order, once the person sends it in the main session.
+  on('prompt.submit', async ($, e, next) => {
+    if (e.text.includes(FROM_PANEL)) {
+      await update($, requests, list =>
+        list.map((one, at) => (at === list.length - 1 && e.text.includes(one.goal) ? { ...one, isSent: true as const } : one)),
+      )
+    }
     return next(e)
   })
 
@@ -716,7 +935,7 @@ export const register: Register = on => {
       const shownLines = isEarlier ? lines : lines.slice(-SHOWN)
       const hidden = lines.length - shownLines.length
       const room = isGroup
-        ? 'Escribe a todos, o nombra a alguien con @ (@po, @qa, @dev…)'
+        ? 'Escribe al Coordinador, o nombra a un agente con @ (@po, @qa, @dev…)'
         : `Escribe a ${labelOf(showing)}`
       const back = (key: string) => (
         <Button
@@ -754,7 +973,11 @@ export const register: Register = on => {
             </Button>
           )}
           {lines.length === 0 && typing.length === 0 && (
-            <Text dimColor>{isGroup ? 'Escribe al equipo para empezar.' : `Escribe a ${labelOf(showing)} para empezar.`}</Text>
+            <Text dimColor>
+              {isGroup
+                ? 'Escribe al Coordinador: pregúntale «¿cómo va…?» o pídele una función nueva. Para hablar con un agente, nómbralo con @.'
+                : `Escribe a ${labelOf(showing)} para empezar.`}
+            </Text>
           )}
           {shownLines.map(one => {
             const isMine = one.from === ME
@@ -966,6 +1189,40 @@ export const register: Register = on => {
       )
     })
 
+    // The Coordinador: the main session, and the last function handed to it.
+    const asked = (await read($, requests)).at(-1)
+    const coordinator = (
+      <Box
+        key="tarjeta-coordinador"
+        flexDirection="column"
+        gap={1}
+        borderStyle="round"
+        borderColor={TONE.border}
+        backgroundColor={fill(TONE.card)}
+        hover={{ borderColor: TONE.hover }}
+        paddingX={1}
+        paddingY={1}
+      >
+        <Box flexDirection="row" gap={1} alignItems="center">
+          {tile(COORD, 16)}
+          <Text bold>Coordinador</Text>
+          <Text dimColor size="caption">
+            sesión principal
+          </Text>
+        </Box>
+        <Box paddingLeft={5}>
+          <Text dimColor size="caption" wrap="truncate-end">
+            {asked
+              ? `Última función: «${asked.goal}»${asked.isSent ? '' : ' · orden aún no enviada'}`
+              : 'Recibe los mensajes del grupo que no nombran a nadie.'}
+          </Text>
+        </Box>
+        <Button key="chat-coordinador" plain onPress={() => openChat($, GROUP)}>
+          <Text dimColor>Hablar con el Coordinador ↗</Text>
+        </Button>
+      </Box>
+    )
+
     const delivered = list.filter(one => one.status !== 'trabajando').reverse()
     const recent = isAll ? delivered : delivered.slice(0, 3)
 
@@ -1012,6 +1269,8 @@ export const register: Register = on => {
         {isTeamPaused && (
           <Text color="warning">⏸ El equipo está en pausa: Claude no puede lanzar agentes hasta que lo reanudes.</Text>
         )}
+
+        {coordinator}
 
         <Box flexDirection="column">
           <Box flexDirection="row" flexWrap="wrap" gap={1}>
