@@ -1,0 +1,1 @@
+{ "name": "contador-herramientas", "version": "0.1.0", "description": "Cuenta las herramientas usadas en la sesión y lo muestra en la barra de estado", "types": "./types/index.d.ts", "license": "MIT", "author": { "name": "Eres" } }
