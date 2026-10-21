@@ -59,6 +59,9 @@ test('el panel muestra quién trabaja y qué entregó, en cada superficie', asyn
     // Opening a delivery shows its facts; Ver conversación the whole report.
     await ui.press({ key: 'a1' })
     expect(await ui.find({ type: 'Text', text: /1 herramientas/ })).toBeDefined()
+    // Opening it also shows what the agent did, in short.
+    expect(await ui.find({ type: 'Text', text: /^RESUMEN$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Como usuario quiero entrar$/ })).toBeDefined()
     await ui.press({ key: 'completo-a1' })
     expect(await ui.find({ type: 'Markdown', text: /Historias/ })).toBeDefined()
     await ui.press({ key: 'completo-a1' })
