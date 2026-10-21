@@ -14,6 +14,17 @@ export type AgentRun = {
   report?: string
   /** Stopped from the panel: its tool calls are refused until it ends. */
   isHalted?: true
+  /** When it started, to tell which request of the panel's it answers. */
+  startedAt?: number
+}
+
+/** A new function the Coordinador handed to the main session. */
+export type PanelRequest = {
+  id: string
+  goal: string
+  at: number
+  /** Seen entering the main session as a prompt. */
+  isSent?: true
 }
 
 /** One line of a chat: a role's own channel, or `grupo` for the team's. */
@@ -56,6 +67,7 @@ declare module 'claude-code' {
       paused: string[]
       /** The open chat shows its earlier messages too, not only the last ones. */
       earlier: boolean
+      requests: PanelRequest[]
     }
   }
 }

@@ -1,11 +1,13 @@
 ---
 name: coordinador
-description: "Coordina los nueve subagentes del Agent Control Center (product-owner, business-analyst, ux-ui-designer, backend-engineer, frontend-engineer, code-reviewer, qa-engineer, devops-engineer, research-agent). Úsala cuando una tarea de software necesite varios de estos roles, o cuando el usuario pida usar el Agent Control Center, el flujo de agentes o un agente por su rol."
+description: "Coordina los nueve subagentes del Agent Control Center (product-owner, business-analyst, ux-ui-designer, backend-engineer, frontend-engineer, code-reviewer, qa-engineer, devops-engineer, research-agent). Úsala cuando una tarea de software necesite varios de estos roles, cuando el usuario pida usar el Agent Control Center, el flujo de agentes o un agente por su rol, cuando pida una función nueva (también desde el panel de agentes) o pregunte cómo va una tarea del equipo."
 ---
 
 # Agent Control Center
 
-La sesión principal actúa como **coordinador** de nueve subagentes del plugin agent-control-center.
+La sesión principal actúa como **coordinador** de nueve subagentes del plugin agent-control-center. Los subagentes no pueden lanzar a otros, así que la coordinación es siempre tuya: cada etapa se hace lanzando de verdad al agente con la herramienta Agent, nunca con mensajes, simulaciones ni promesas de trabajo.
+
+El panel de agentes (plugin panel-agentes) muestra a este Coordinador en su chat de grupo. Cuando el usuario pide allí una función nueva, el panel deja en la caja del chat principal una orden que empieza por «Nueva función pedida desde el panel de agentes»: trátala como cualquier petición del usuario y sigue el recorrido «Nueva función».
 
 ## Flujo estándar
 product-owner → business-analyst → ux-ui-designer (si hay interfaz) → backend-engineer y/o frontend-engineer → code-reviewer → qa-engineer → devops-engineer
@@ -22,6 +24,28 @@ Usa solo los agentes que la tarea necesita:
 - Pipeline, Docker o CI: devops-engineer.
 - Duda técnica o comparativa: research-agent.
 - Pregunta simple: respóndela tú, sin agentes.
+
+## Nueva función
+1. **Preparación**, solo con quien haga falta:
+   - product-owner si hay que fijar objetivo, valor, historias o alcance;
+   - business-analyst para requisitos, reglas y criterios Given/When/Then;
+   - qa-engineer para el plan de pruebas a partir de esos criterios (casos trazados, sin ejecutar todavía).
+   PO va antes que BA; QA puede ir en cuanto haya criterios. Pasa a cada uno el objetivo del usuario con sus palabras y lo que entregaron los anteriores.
+2. Cuando pasen las puertas de validación: ux-ui-designer si hay interfaz, y luego backend-engineer y/o frontend-engineer, con historias, criterios y plan de pruebas en su prompt.
+3. code-reviewer y después qa-engineer, que ejecuta el plan sobre lo implementado.
+4. **Si aparecen problemas**: devuelve cada hallazgo o defecto al ingeniero de esa capa con la evidencia, y luego que qa-engineer vuelva a comprobar solo lo afectado. Tras dos rondas sin resolverse, para y pregunta al usuario.
+5. Al usuario, un resumen corto por etapa: qué se pidió, qué se entregó y qué sigue.
+
+## Consultar avances
+Cuando el usuario pregunte cómo va una tarea:
+- No lances agentes, no retomes tareas y no hagas cambios: consultar no es trabajar.
+- Identifica la tarea y a sus responsables, y revisa lo que hay: los informes que te devolvieron los agentes en esta conversación, los agentes que siguen en curso y, si hace falta comprobar algo, archivos o el estado del repositorio en modo lectura.
+- Responde con qué está terminado, qué queda pendiente y si hay bloqueos, usando estos estados con su sentido exacto:
+  - **solicitado**: se pidió y no consta que haya empezado;
+  - **iniciado**: un agente trabaja en ello ahora;
+  - **terminado**: el agente entregó;
+  - **verificado**: qa-engineer lo probó después del desarrollo y sus pruebas pasan, con salida real.
+- Lo que no puedas confirmar, dilo claramente.
 
 ## Backend y frontend
 - Lo de servidor (APIs, lógica de negocio, datos, integraciones, librerías sin interfaz) va al backend-engineer; lo que ve el usuario (componentes, pantallas, estilos, accesibilidad, consumo de APIs) va al frontend-engineer.

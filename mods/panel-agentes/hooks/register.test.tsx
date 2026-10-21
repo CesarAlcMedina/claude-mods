@@ -116,6 +116,9 @@ test('el chat con un agente y el de grupo', async ($, on) => {
     if (e.prompt.includes('agente Analista de negocio') && e.prompt.includes('PASO')) {
       return { value: { isAnswered: true as const, text: 'PASO', usage } }
     }
+    if (e.prompt.includes('eres el Coordinador')) {
+      return { value: { isAnswered: true as const, text: 'Respuesta del Coordinador.', usage } }
+    }
     const role = /eres el agente ([^ ]+(?: [^ ]+)?) del/.exec(e.prompt)?.[1] ?? '?'
     return { value: { isAnswered: true as const, text: `Respuesta de ${role}.`, usage } }
   })
@@ -157,19 +160,21 @@ test('el chat con un agente y el de grupo', async ($, on) => {
   expect(prompts[2]).not.toContain('Lo que ya se respondió')
   expect(prompts[4]).toContain('Lo que ya se respondió a este mensaje:\n\nProduct Owner: Respuesta de Product Owner.\n\nBackend: Respuesta de Backend.')
 
-  // Naming nobody, a quick pick chooses who answers: two at most, and the
-  // second may pass once it sees the first.
+  // Naming nobody, the message goes to the Coordinador: it consults the two
+  // at most a quick pick chooses, the second seeing the first, and answers once.
   await ui.input({ key: 'entrada-grupo-1', text: 'Hola equipo' })
   expect(picks.length).toBe(1)
   expect(picks[0]).toContain('Hola equipo')
-  expect(prompts.length).toBe(7)
+  expect(prompts.length).toBe(8)
   expect(prompts[5]).toContain('agente Diseño UX/UI')
   expect(prompts[6]).toContain('agente QA')
   expect(prompts[5]).toContain('Aporta solo lo nuevo')
   expect(prompts[5]).not.toContain('PASO')
   expect(prompts[6]).toContain('responde solo con la palabra PASO')
   expect(prompts[6]).toContain('Diseño UX/UI: Respuesta de Diseño UX/UI.')
-  expect(await ui.find({ type: 'Markdown', text: /Respuesta de Diseño UX\/UI/ })).toBeDefined()
+  expect(prompts[7]).toContain('eres el Coordinador')
+  expect(await ui.find({ type: 'Markdown', text: /Respuesta del Coordinador/ })).toBeDefined()
+  expect(await ui.find({ type: 'Markdown', text: /Respuesta de Diseño UX\/UI/ })).toBeUndefined()
 
   // Emptying the chat clears its lines.
   await ui.press({ key: 'vaciar' })
@@ -253,7 +258,7 @@ test('los agentes se escriben en el chat de grupo', async ($, on) => {
   await ui.unmount()
 })
 
-test('menos ecos: quién contesta, en qué orden y cuándo callan', async ($, on) => {
+test('el Coordinador consulta solo a quien hace falta y contesta una vez', async ($, on) => {
   const prompts: string[] = []
   const picks: string[] = []
   const usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
@@ -266,11 +271,12 @@ test('menos ecos: quién contesta, en qué orden y cuándo callan', async ($, on
       ? { value: { isAnswered: false as const, reason: 'aborted' as const, usage } }
       : { value: { isAnswered: true as const, text: picked, usage } }
   })
-  // Each role says something of its own, but Reviewer passes once QA has
+  // Each role brings something of its own, but Reviewer passes once QA has
   // spoken, and the PO passes a thank-you from another agent.
   on('model.fork', (_, e) => {
     prompts.push(e.prompt)
     const said = (text: string) => ({ value: { isAnswered: true as const, text, usage } })
+    if (e.prompt.includes('eres el Coordinador')) return said(`Síntesis ${prompts.length}.`)
     if (e.prompt.includes('agente Revisión de código del') && e.prompt.includes('QA: ')) return said('PASO')
     if (e.prompt.includes('agente Product Owner del') && e.prompt.includes('Gracias, queda claro')) return said('PASO')
     if (e.prompt.includes('agente QA del') && e.prompt.includes('confirma con el PO')) return said('@po Gracias, queda claro.')
@@ -278,78 +284,171 @@ test('menos ecos: quién contesta, en qué orden y cuándo callan', async ($, on
     return said(`Aporte de ${role}.`)
   })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.press({ key: 'chat-grupo' })
-  const lines = async (pattern: RegExp) => (await ui.find({ type: 'Markdown', text: pattern })) !== undefined
+  await ui.press({ key: 'chat-coordinador' })
+  const shows = async (pattern: RegExp) => (await ui.find({ type: 'Markdown', text: pattern })) !== undefined
 
-  // A decision: one agent acknowledges it, with what it is asked to bring.
-  picked = '@po: reconocer la decisión y decir el siguiente paso'
+  // A decision: the Coordinador asks one agent, and only it answers the person.
+  picked = 'TIPO: otro\n@po: reconocer la decisión y decir el siguiente paso'
   await ui.input({ key: 'entrada-grupo-0', text: 'Decidido: el login va con Google.' })
   expect(picks[0]).toContain('Nunca una ronda de confirmaciones')
-  expect(prompts.length).toBe(1)
-  expect(prompts[0]).toContain('Lo que se espera de ti en este mensaje (una aportación de chat, no un entregable): reconocer la decisión y decir el siguiente paso.')
-  expect(prompts[0]).toContain('Ante una decisión del usuario')
+  expect(prompts.length).toBe(2)
+  expect(prompts[0]).toContain('El Coordinador te consulta')
+  expect(prompts[0]).toContain('reconocer la decisión y decir el siguiente paso.')
+  expect(prompts[1]).toContain('Sus aportaciones:\n\nProduct Owner: Aporte de Product Owner.')
+  expect(await shows(/Síntesis 2/)).toBe(true)
+  expect(await shows(/Aporte de Product Owner/)).toBe(false)
 
-  // Two specialties with different parts: both answer, the second after the first.
-  picked = '@backend: el contrato de la API\n@frontend: los estados de la pantalla'
+  // Two specialties with different parts: the second sees the first, and
+  // the Coordinador gathers both.
+  picked = 'TIPO: otro\n@backend: el contrato de la API\n@frontend: los estados de la pantalla'
   await ui.input({ key: 'entrada-grupo-1', text: '¿Qué falta para el login?' })
-  expect(prompts.length).toBe(3)
-  expect(prompts[1]).toContain('agente Backend del')
-  expect(prompts[2]).toContain('agente Frontend del')
-  expect(prompts[2]).toContain('Lo que se espera de ti en este mensaje (una aportación de chat, no un entregable): los estados de la pantalla.')
-  expect(prompts[2]).toContain('Backend: Aporte de Backend.')
-  expect(await lines(/Aporte de Frontend/)).toBe(true)
-
-  // Two who would say the same: the second sees the first and passes.
-  picked = '@qa: riesgos del login\n@reviewer: riesgos del login'
-  await ui.input({ key: 'entrada-grupo-2', text: '¿Qué riesgos ves?' })
   expect(prompts.length).toBe(5)
-  expect(prompts[4]).toContain('agente Revisión de código del')
-  expect(await lines(/Aporte de QA/)).toBe(true)
-  expect(await lines(/^PASO$/)).toBe(false)
+  expect(prompts[3]).toContain('agente Frontend del')
+  expect(prompts[3]).toContain('Backend: Aporte de Backend.')
+  expect(prompts[4]).toContain('Backend: Aporte de Backend.\n\nFrontend: Aporte de Frontend.')
 
-  // A direct mention: only that agent, and it must answer.
+  // Two who would say the same: the second passes and is left out.
+  picked = 'TIPO: otro\n@qa: riesgos del login\n@reviewer: riesgos del login'
+  await ui.input({ key: 'entrada-grupo-2', text: '¿Qué riesgos ves?' })
+  expect(prompts.length).toBe(8)
+  expect(prompts[7]).toContain('Sus aportaciones:\n\nQA: Aporte de QA.\n\nCómo respondes')
+  expect(prompts[7]).not.toContain('Revisión de código: ')
+
+  // A direct mention still goes straight to that agent.
   await ui.input({ key: 'entrada-grupo-3', text: '@ux ¿cómo queda el botón?' })
-  expect(prompts.length).toBe(6)
-  expect(prompts[5]).toContain('agente Diseño UX/UI del')
-  expect(prompts[5]).not.toContain('PASO')
+  expect(prompts.length).toBe(9)
+  expect(prompts[8]).toContain('agente Diseño UX/UI del')
+  expect(prompts[8]).not.toContain('El Coordinador te consulta')
+  expect(await shows(/Aporte de Diseño UX\/UI/)).toBe(true)
 
-  // An exchange already settled: QA thanks the PO, and the PO lets it end.
+  // Agents still talk among themselves, and a settled exchange ends there.
   await ui.input({ key: 'entrada-grupo-4', text: '@qa confirma con el PO' })
-  expect(prompts.length).toBe(8)
-  expect(prompts[7]).toContain('la conversación puede terminar ahí')
-  expect(await lines(/Gracias, queda claro/)).toBe(true)
+  expect(prompts.length).toBe(11)
+  expect(prompts[10]).toContain('la conversación puede terminar ahí')
 
-  // Nothing asked: no one answers, and the chat says so quietly.
-  picked = 'NADIE'
+  // Nothing asked: no one is consulted, and the chat says so quietly.
+  picked = 'TIPO: otro\nNADIE'
   await ui.input({ key: 'entrada-grupo-5', text: 'Vale, gracias' })
-  expect(prompts.length).toBe(8)
+  expect(prompts.length).toBe(11)
   expect(await ui.find({ type: 'Text', text: /Nadie tenía nada que añadir/ })).toBeDefined()
 
-  // A question always gets someone, even when the pick says no one.
+  // A question always gets an answer, and a failed pick is not "no one".
   await ui.input({ key: 'entrada-grupo-6', text: '¿Y ahora?' })
-  expect(prompts.length).toBe(9)
-  expect(prompts[8]).toContain('agente Product Owner del')
-  expect(prompts[8]).toContain('pedirle la aclaración que haga falta')
-
-  // A failed pick is not "no one": the PO answers.
+  expect(prompts.length).toBe(13)
+  expect(prompts[11]).toContain('pedirle la aclaración que haga falta')
   picked = null
   await ui.input({ key: 'entrada-grupo-7', text: 'Revisad lo del login' })
-  expect(prompts.length).toBe(10)
-  expect(prompts[9]).toContain('agente Product Owner del')
+  expect(prompts.length).toBe(15)
+  expect(prompts[13]).toContain('agente Product Owner del')
 
-  // The pick reads further back than the last few lines.
-  expect(picks.at(-1)).toContain('Decidido: el login va con Google.')
-
-  // Without tools, no agent may claim to be editing or testing.
-  expect(prompts[9]).toContain('Nunca digas que estás editando, probando')
-  expect(prompts[9]).toContain('sugiere pedírselo a Claude')
+  // Without tools, no one may claim to be editing or testing.
+  expect(prompts[14]).toContain('Nunca digas que estás editando, probando')
 
   // In an agent's own chat, it knows what was decided in the group.
   await ui.press({ key: 'volver-abajo' })
   await ui.press({ key: 'chat-qa-engineer' })
   await ui.input({ key: 'entrada-qa-engineer-0', text: '¿Por dónde empiezas?' })
-  expect(prompts[10]).toContain('Lo último del chat de grupo')
-  expect(prompts[10]).toContain('Tú: Decidido: el login va con Google.')
+  expect(prompts[15]).toContain('Lo último del chat de grupo')
+  expect(prompts[15]).toContain('Tú: Decidido: el login va con Google.')
+  await ui.unmount()
+})
+
+test('el Coordinador informa del avance sin lanzar nada y pasa las funciones nuevas a la sesión principal', async ($, on) => {
+  const prompts: string[] = []
+  const fills: string[] = []
+  const usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
+  let picked = 'TIPO: estado'
+  let canFill = true
+  let count = 0
+  mock.store(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('agent.spawn', () => ({ model: 'test', agentId: `a${++count}` }))
+  on('tool.call', () => ({ result: {} }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('prompt.fill', (_, e) => {
+    fills.push(e.text)
+    return { isFilled: canFill }
+  })
+  // What a working agent last wrote, read from its own conversation.
+  on('session.messages', () => ({
+    value: [{ role: 'assistant' as const, text: 'Llevo el endpoint de callback; falta la sesión.', toolUses: [] }],
+  }))
+  on('model.complete', () => ({ value: { isAnswered: true as const, text: picked, usage } }))
+  on('model.fork', (_, e) => {
+    prompts.push(e.prompt)
+    return { value: { isAnswered: true as const, text: `Informe ${prompts.length}.`, usage } }
+  })
+  const spawn = (role: string, description: string) =>
+    $.agent.spawn({
+      tool_use_id: 't',
+      prompt: 'Trabaja',
+      description,
+      subagentType: `agent-control-center:${role}`,
+      provider: PROVIDER,
+      parentModel: 'test',
+      background: false,
+      fork: false,
+    })
+  const finish = (agentId: string, answer: string) =>
+    $.turn.complete({ answer, durationMs: 60000, isAborted: false, turnId: 'u', agentId, reason: 'answer' })
+
+  await spawn('product-owner', 'Historias del login')
+  await finish('a1', 'Tres historias listas para el login.')
+  await spawn('backend-engineer', 'API del login')
+
+  // Asking how it goes reads what the panel and the agent hold, and starts nothing.
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'chat-coordinador' })
+  await ui.input({ key: 'entrada-grupo-0', text: '¿Cómo va el login?' })
+  expect(prompts.length).toBe(1)
+  expect(prompts[0]).toContain('eres el Coordinador')
+  expect(prompts[0]).toContain('Solo informas: no lanzas agentes')
+  expect(prompts[0]).toContain('- Product Owner, tarea «Historias del login»: terminado, entregó su informe (1 min')
+  expect(prompts[0]).toContain('Resumen de su informe: Tres historias listas para el login.')
+  expect(prompts[0]).toContain('- Backend, tarea «API del login»: iniciado, trabaja en ello ahora')
+  expect(prompts[0]).toContain('Lo último que escribió: «Llevo el endpoint de callback; falta la sesión.»')
+  expect(prompts[0]).toContain('No consta ninguna entrega de QA posterior al desarrollo: nada está verificado.')
+  expect(prompts[0]).toContain('verificado (QA lo probó después del desarrollo')
+  expect(await ui.find({ type: 'Markdown', text: /Informe 1/ })).toBeDefined()
+  expect(fills).toEqual([])
+  expect(count).toBe(2)
+
+  // A new function: the order waits in the main prompt box for the person's Enter.
+  picked = 'TIPO: funcion'
+  await ui.input({ key: 'entrada-grupo-1', text: 'Quiero exportar las reservas a PDF' })
+  expect(fills.length).toBe(1)
+  expect(fills[0]).toStartWith('/agent-control-center:coordinador Nueva función pedida desde el panel de agentes: «Quiero exportar las reservas a PDF».')
+  expect(prompts.length).toBe(1)
+  expect(await ui.find({ type: 'Markdown', text: /envíala con Enter/ })).toBeDefined()
+  await ui.press({ key: 'volver-abajo' })
+  expect(await ui.find({ type: 'Text', text: /orden aún no enviada/ })).toBeDefined()
+
+  // Sent, the flow runs in the main session: development, then QA.
+  // The person sends it with their own Enter.
+  await $.prompt.submit({ text: fills[0] ?? '', wait: false, origin: { kind: 'composer' } })
+  expect(await ui.find({ type: 'Text', text: /orden aún no enviada/ })).toBeUndefined()
+  await spawn('backend-engineer', 'Exportar a PDF')
+  await finish('a3', 'Endpoint de exportación hecho, con pruebas unitarias.')
+  await spawn('qa-engineer', 'Probar la exportación')
+  await finish('a4', 'Las 6 pruebas de exportación pasan.')
+  await ui.press({ key: 'chat-coordinador' })
+  picked = 'TIPO: estado'
+  await ui.input({ key: 'entrada-grupo-2', text: '¿Cómo va esta tarea?' })
+  expect(prompts.length).toBe(2)
+  expect(prompts[1]).toContain('Última función pedida desde el panel: «Quiero exportar las reservas a PDF»')
+  expect(prompts[1]).toContain('La orden llegó a la sesión principal.')
+  expect(prompts[1]).toContain('Backend, tarea «Exportar a PDF»: terminado')
+  expect(prompts[1]).toContain('QA entregó después del desarrollo')
+  // Only what started since the request counts for it.
+  expect(prompts[1]).not.toContain('Historias del login')
+
+  // Without a prompt box to take the order, the Coordinador shows it to send by hand.
+  canFill = false
+  picked = 'TIPO: funcion'
+  await ui.input({ key: 'entrada-grupo-3', text: 'Añade recordatorios por correo' })
+  expect(await ui.find({ type: 'Markdown', text: /Envíala tú allí/ })).toBeDefined()
+  expect(count).toBe(4)
   await ui.unmount()
 })
 
