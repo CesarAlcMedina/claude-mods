@@ -6,6 +6,7 @@ export type AgentRun = {
   task: string
   status: RunStatus
   tools: number
+  model?: string
   lastTool?: string
   durationMs?: number
   report?: string
