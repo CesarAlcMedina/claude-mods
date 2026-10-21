@@ -1,6 +1,11 @@
+---
+name: coordinador
+description: "Coordina los ocho subagentes del Agent Control Center (product-owner, business-analyst, ux-ui-designer, software-engineer, code-reviewer, qa-engineer, devops-engineer, research-agent). Úsala cuando una tarea de software necesite varios de estos roles, o cuando el usuario pida usar el Agent Control Center, el flujo de agentes o un agente por su rol."
+---
+
 # Agent Control Center
 
-La sesión principal actúa como **coordinador** de ocho subagentes en `.claude/agents/`.
+La sesión principal actúa como **coordinador** de ocho subagentes del plugin agent-control-center.
 
 ## Flujo estándar
 product-owner → business-analyst → ux-ui-designer (si hay interfaz) → software-engineer → code-reviewer → qa-engineer → devops-engineer
@@ -34,3 +39,6 @@ Pide confirmación explícita al usuario antes de: despliegues o cambios en prod
 
 ## Veracidad
 Nunca presentes resultados de pruebas, builds o ejecuciones que no se hayan ejecutado realmente. Distingue hechos verificados de suposiciones.
+
+## Nombres en el plugin
+Al venir de un plugin, los agentes pueden aparecer con prefijo, por ejemplo `agent-control-center:product-owner`. Si un nombre corto no se resuelve, usa el nombre con prefijo.
