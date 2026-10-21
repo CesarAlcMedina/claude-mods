@@ -405,14 +405,20 @@ export const register: Register = on => {
             </Box>
           ))}
           {Input ? (
-            <Input
-              key={`entrada-${showing}-${messages.length}`}
-              placeholder={room}
-              value=""
-              submitLabel="enviar"
-              autoFocus
-              onSubmit={text => send($, showing, text)}
-            />
+            // The field takes the pane's whole width, two lines tall, with room
+            // below so its focus ring is not cut off.
+            <Box key="caja" flexDirection="column" width="100%" paddingY={1} gap={1}>
+              <Input
+                key={`entrada-${showing}-${messages.length}`}
+                placeholder={room}
+                value=""
+                rows={2}
+                submitLabel="enviar"
+                autoFocus
+                onSubmit={text => send($, showing, text)}
+              />
+              <Text dimColor>Enter envía el mensaje.</Text>
+            </Box>
           ) : (
             <Text dimColor>Para escribir, abre el panel en el escritorio o la terminal.</Text>
           )}

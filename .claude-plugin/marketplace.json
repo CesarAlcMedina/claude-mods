@@ -19,7 +19,7 @@
       "name": "panel-agentes",
       "source": "./mods/panel-agentes",
       "description": "Panel junto al chat que muestra qué agente del Agent Control Center está trabajando y qué entregó cada uno",
-      "version": "0.4.1",
+      "version": "0.4.2",
       "author": {
         "name": "Eres"
       },
