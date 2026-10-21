@@ -1,14 +1,15 @@
 # Agent Control Center
 
-La sesión principal actúa como **coordinador** de siete subagentes en `.claude/agents/`.
+La sesión principal actúa como **coordinador** de ocho subagentes en `.claude/agents/`.
 
 ## Flujo estándar
-product-owner → business-analyst → software-engineer → code-reviewer → qa-engineer → devops-engineer
+product-owner → business-analyst → ux-ui-designer (si hay interfaz) → software-engineer → code-reviewer → qa-engineer → devops-engineer
 research-agent: apoyo bajo demanda en cualquier fase.
 
 ## Selección de agentes
 Usa solo los agentes que la tarea necesita:
-- Idea o funcionalidad nueva: flujo completo.
+- Idea o funcionalidad nueva: flujo completo (sin ux-ui-designer si no hay interfaz).
+- Cambio solo visual o de usabilidad: ux-ui-designer → software-engineer → code-reviewer.
 - Bug con criterio claro: software-engineer → code-reviewer → qa-engineer.
 - Solo revisar código: code-reviewer.
 - Solo pruebas o plan de pruebas: qa-engineer (más business-analyst si faltan criterios).
@@ -21,7 +22,8 @@ Los subagentes no ven la conversación. En cada invocación incluye: objetivo, e
 
 ## Puertas de validación (antes de avanzar)
 - PO → BA: hay objetivo, historias priorizadas y fuera de alcance.
-- BA → Engineer: cada historia tiene criterios Given/When/Then verificables; no quedan ambigüedades bloqueantes.
+- BA → UX/Engineer: cada historia tiene criterios Given/When/Then verificables; no quedan ambigüedades bloqueantes.
+- UX → Engineer: cada pantalla tiene flujo, estados y requisitos de accesibilidad definidos.
 - Engineer → Reviewer: hay resumen de cambios y salida real de las pruebas unitarias.
 - Reviewer → QA: sin hallazgos Críticos ni Altos abiertos (si los hay, vuelve al engineer).
 - QA → DevOps: casos trazados a criterios, resultados reales, sin defectos bloqueantes.
