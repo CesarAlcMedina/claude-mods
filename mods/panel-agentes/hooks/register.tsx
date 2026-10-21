@@ -212,7 +212,11 @@ const chatPrompt = (role: string, channel: string, history: ChatMessage[], text:
       ? `El usuario te escribe en el chat de grupo del panel de agentes, con todo el equipo: ${team}.`
       : 'El usuario te escribe por tu chat en el panel de agentes.',
     `Lo que has hecho en esta sesión:\n${work}`,
-    'Responde en español, breve y en tono de conversación: unas pocas frases o una lista corta, en primera persona y desde tu rol. Usa lo que sabes de la conversación y del proyecto. En este chat no tienes herramientas: si hace falta hacer algo, dilo y sugiere pedírselo a Claude.',
+    // Answers in the pane read as chat lines: short, plain text, no report.
+    isGroup
+      ? 'Responde en español como en un chat de grupo: una o dos frases cortas, sin listas, títulos ni negritas, en primera persona y desde tu rol. No repitas lo que ya dijo otro agente.'
+      : 'Responde en español como en un chat: de una a tres frases cortas, sin listas, títulos ni negritas, en primera persona y desde tu rol.',
+    'Da más detalle solo si el usuario lo pide. Usa lo que sabes de la conversación y del proyecto. En este chat no tienes herramientas: si hace falta hacer algo, dilo y sugiere pedírselo a Claude.',
     isGroup && !mustAnswer
       ? `Si desde tu rol no tienes nada útil que aportar a este mensaje, responde solo con la palabra ${PASS}.`
       : '',
@@ -405,14 +409,20 @@ export const register: Register = on => {
             </Box>
           ))}
           {Input ? (
-            <Input
-              key={`entrada-${showing}-${messages.length}`}
-              placeholder={room}
-              value=""
-              submitLabel="enviar"
-              autoFocus
-              onSubmit={text => send($, showing, text)}
-            />
+            // The field takes the pane's whole width, two lines tall, with room
+            // below so its focus ring is not cut off.
+            <Box key="caja" flexDirection="column" width="100%" paddingY={1} gap={1}>
+              <Input
+                key={`entrada-${showing}-${messages.length}`}
+                placeholder={room}
+                value=""
+                rows={2}
+                submitLabel="enviar"
+                autoFocus
+                onSubmit={text => send($, showing, text)}
+              />
+              <Text dimColor>Enter envía el mensaje.</Text>
+            </Box>
           ) : (
             <Text dimColor>Para escribir, abre el panel en el escritorio o la terminal.</Text>
           )}

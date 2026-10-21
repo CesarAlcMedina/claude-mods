@@ -123,6 +123,7 @@ test('el chat con un agente y el de grupo', async ($, on) => {
   await ui.press({ key: 'chat-qa-engineer' })
   await ui.input({ key: 'entrada-qa-engineer-0', text: '¿Qué estás haciendo?' })
   expect(prompts[0]).toContain('eres el agente QA del')
+  expect(prompts[0]).toContain('de una a tres frases cortas')
   expect(prompts[0]).toContain('¿Qué estás haciendo?')
   expect(await ui.find({ type: 'Markdown', text: /Respuesta de QA/ })).toBeDefined()
 
@@ -146,6 +147,7 @@ test('el chat con un agente y el de grupo', async ($, on) => {
   await ui.input({ key: 'entrada-grupo-3', text: 'Hola equipo' })
   expect(prompts.length).toBe(12)
   expect(prompts[4]).toContain('chat de grupo')
+  expect(prompts[4]).toContain('una o dos frases cortas')
   expect(await ui.find({ type: 'Markdown', text: /PASO/ })).toBeUndefined()
   expect(await ui.find({ type: 'Markdown', text: /Respuesta de Diseño UX\/UI/ })).toBeDefined()
 
