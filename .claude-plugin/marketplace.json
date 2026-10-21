@@ -9,7 +9,7 @@
       "name": "agent-control-center",
       "source": "./mods/agent-control-center",
       "description": "Nueve subagentes (PO, BA, UX/UI, Backend, Frontend, Reviewer, QA, DevOps, Research) coordinados por la skill coordinador",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "author": {
         "name": "Eres"
       },

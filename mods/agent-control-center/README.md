@@ -18,6 +18,6 @@ Flujo: product-owner → business-analyst → ux-ui-designer (si hay interfaz) �
 
 Instalar: `/plugin install agent-control-center --marketplace CesarAlcMedina/claude-mods` (o en la app: **+** → **Plugins** → **Add plugin**).
 
-Uso: "Usa el Agent Control Center para…", `/agent-control-center:coordinador`, o un agente directo: "Usa product-owner para…". Lista con `/agents`.
+Uso: "Usa el Agent Control Center para…", `/agent-control-center:coordinador`, o un agente directo: "Usa product-owner para…". Para verlos, pregúntale a Claude «¿qué agentes tienes?».
 
 Los plugins no pueden traer permisos de `settings.json`. Para que Claude pida confirmación antes de push, release o `docker push` en un proyecto, copia `.claude/settings.json` de este repositorio al proyecto.
