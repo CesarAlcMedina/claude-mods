@@ -55,9 +55,12 @@ test('el panel muestra quién trabaja y qué entregó, en cada superficie', asyn
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect(await ui.find({ type: 'Text', text: /1m 5s · 1 herramientas/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /1 min 5 s · 1 herramientas/ })).toBeDefined()
     await ui.press({ key: 'a1' })
-    expect(await ui.find({ type: 'Markdown' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Como usuario quiero entrar/ })).toBeDefined()
+    await ui.press({ key: 'completo-a1' })
+    expect(await ui.find({ type: 'Markdown', text: /Historias/ })).toBeDefined()
+    await ui.press({ key: 'completo-a1' })
     await ui.press({ key: 'a1' })
     await ui.unmount()
   }
@@ -85,6 +88,7 @@ test('el modelo elegido en la tarjeta se usa al lanzar el agente', async ($, on)
     })
 
   const desk = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await desk.press({ key: 'menu-code-reviewer' })
   await desk.select({ key: 'modelo-code-reviewer', value: 'opus' })
   await desk.unmount()
   await spawn()
@@ -93,7 +97,7 @@ test('el modelo elegido en la tarjeta se usa al lanzar el agente', async ($, on)
   const phone = await $.ui.mount({ ...PANE, surface: 'mobile' })
   expect(await phone.find({ type: 'Button', text: /Modelo: Opus/ })).toBeDefined()
   await phone.press({ key: 'modelo-code-reviewer' })
-  expect(await phone.find({ type: 'Button', text: /Modelo: Predeterminado/ })).toBeDefined()
+  expect(await phone.find({ type: 'Button', text: /Modelo: Como el equipo/ })).toBeDefined()
   await phone.unmount()
   await spawn()
 

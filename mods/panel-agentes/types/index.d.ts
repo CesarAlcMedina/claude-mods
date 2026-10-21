@@ -27,14 +27,27 @@ export type ChatMessage = {
   isPending?: boolean
 }
 
+/** Which cards the team tabs show. */
+export type TeamFilter = 'todos' | 'en-curso' | 'completados' | 'disponibles'
+
 declare module 'claude-code' {
   interface PluginState {
     'panel-agentes': {
       runs: AgentRun[]
+      /** The delivery whose summary is shown. */
       expanded: string | null
+      /** The delivery whose whole report is shown. */
+      full: string | null
       chat: ChatMessage[]
       /** What the pane shows: '' the team, a role its chat, `grupo` the group's. */
       view: string
+      filter: TeamFilter
+      /** The card whose ⋯ menu is open. */
+      menu: string | null
+      /** Every delivery under Entregas recientes, not only the last three. */
+      showAll: boolean
+      /** The models chosen, as `$.store` keeps them, for drawing. */
+      models: Record<string, string>
     }
   }
 }
