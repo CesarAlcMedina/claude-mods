@@ -8,7 +8,12 @@
     {
       "name": "agent-control-center",
       "source": "./mods/agent-control-center",
-      "description": "Ocho subagentes (PO, BA, UX/UI, Engineer, Reviewer, QA, DevOps, Research) coordinados por la skill coordinador"
+      "description": "Ocho subagentes (PO, BA, UX/UI, Engineer, Reviewer, QA, DevOps, Research) coordinados por la skill coordinador",
+      "version": "0.1.0",
+      "author": {
+        "name": "Eres"
+      },
+      "category": "development"
     }
   ]
 }
