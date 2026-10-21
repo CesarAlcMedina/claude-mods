@@ -22,6 +22,35 @@ export type AgentRun = {
   startedAt?: number
 }
 
+/** The agents a session works with, chosen under «Configurar equipo». */
+export type SessionTeam = {
+  /** Who gets consulted in the chats and launched for new work. */
+  roles: string[]
+  /** Taken off while working: they finish what they have, and take nothing new. */
+  leaving: string[]
+  /** When each role was brought in after the team was first chosen. */
+  joined: Record<string, number>
+  /** False until the person chooses: then every role takes part, as before. */
+  isChosen: boolean
+  /** The team as the main session was last told it. */
+  told?: string
+}
+
+/** «Configurar equipo» while it is open: the roles ticked so far. */
+export type TeamSetup = {
+  draft: string[]
+  /** Roles being taken off with work in progress, asked about first. */
+  busy?: string[]
+}
+
+/** An offer to bring roles that are not in the team in, and pass them a message. */
+export type TeamOffer = {
+  channel: string
+  roles: string[]
+  /** The message they get once in; none for a plain proposal. */
+  messageId?: string
+}
+
 /** A new function the Coordinador handed to the main session. */
 export type PanelRequest = {
   id: string
@@ -74,6 +103,10 @@ declare module 'claude-code' {
       requests: PanelRequest[]
       /** A line for the person above the team, such as an order left to send. */
       notice: string | null
+      /** This session's team. */
+      team: SessionTeam
+      setup: TeamSetup | null
+      offer: TeamOffer | null
     }
   }
 }
