@@ -8,8 +8,8 @@
     {
       "name": "agent-control-center",
       "source": "./mods/agent-control-center",
-      "description": "Ocho subagentes (PO, BA, UX/UI, Engineer, Reviewer, QA, DevOps, Research) coordinados por la skill coordinador",
-      "version": "0.2.0",
+      "description": "Nueve subagentes (PO, BA, UX/UI, Backend, Frontend, Reviewer, QA, DevOps, Research) coordinados por la skill coordinador",
+      "version": "0.3.0",
       "author": {
         "name": "Eres"
       },
@@ -19,7 +19,7 @@
       "name": "panel-agentes",
       "source": "./mods/panel-agentes",
       "description": "Panel junto al chat que muestra qué agente del Agent Control Center está trabajando y qué entregó cada uno",
-      "version": "0.7.0",
+      "version": "0.9.0",
       "author": {
         "name": "Eres"
       },

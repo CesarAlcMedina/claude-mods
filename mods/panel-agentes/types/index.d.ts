@@ -52,6 +52,8 @@ declare module 'claude-code' {
       efforts: Record<string, string>
       /** The roles on pause, `*` for the whole team. */
       paused: string[]
+      /** The open chat shows its earlier messages too, not only the last ones. */
+      earlier: boolean
     }
   }
 }

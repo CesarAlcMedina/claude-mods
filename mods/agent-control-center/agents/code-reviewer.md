@@ -1,6 +1,6 @@
 ---
 name: code-reviewer
-description: "Code Reviewer. Úsalo después de que el software-engineer implemente cambios, para revisar calidad, mantenibilidad, seguridad, rendimiento y errores lógicos. Solo lectura: propone mejoras pero nunca modifica archivos."
+description: "Code Reviewer. Úsalo después de que el backend-engineer o el frontend-engineer implementen cambios, para revisar calidad, mantenibilidad, seguridad, rendimiento y errores lógicos. Solo lectura: propone mejoras pero nunca modifica archivos."
 model: inherit
 tools: Read, Grep, Glob
 ---

@@ -119,38 +119,53 @@ test('el chat con un agente y el de grupo', async ($, on) => {
     const role = /eres el agente ([^ ]+(?: [^ ]+)?) del/.exec(e.prompt)?.[1] ?? '?'
     return { value: { isAnswered: true as const, text: `Respuesta de ${role}.`, usage } }
   })
+  // The pick of who answers a message that names no one.
+  const picks: string[] = []
+  on('model.complete', (_, e) => {
+    picks.push(e.prompt)
+    return { value: { isAnswered: true as const, text: '@ux, @qa, @dev', usage } }
+  })
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'chat-qa-engineer' })
   await ui.input({ key: 'entrada-qa-engineer-0', text: '¿Qué estás haciendo?' })
   expect(prompts[0]).toContain('eres el agente QA del')
-  expect(prompts[0]).toContain('de una a tres frases cortas')
+  expect(prompts[0]).toContain('40 palabras como mucho')
   expect(prompts[0]).toContain('¿Qué estás haciendo?')
   expect(await ui.find({ type: 'Markdown', text: /Respuesta de QA/ })).toBeDefined()
 
   // A second message carries the chat so far, and the field starts empty.
-  expect((await ui.find({ key: 'entrada-qa-engineer-2' }))?.props).toMatchObject({ value: '' })
-  await ui.input({ key: 'entrada-qa-engineer-2', text: '¿Y después?' })
+  expect((await ui.find({ key: 'entrada-qa-engineer-1' }))?.props).toMatchObject({ value: '' })
+  await ui.input({ key: 'entrada-qa-engineer-1', text: '¿Y después?' })
   expect(prompts[1]).toContain('Tú: ¿Qué estás haciendo?')
   expect(prompts[1]).toContain('QA: Respuesta de QA.')
 
-  await ui.press({ key: 'volver' })
+  // The way back is under the field too, not only at the top.
+  await ui.press({ key: 'volver-abajo' })
+  expect(await ui.find({ key: 'chat-grupo' })).toBeDefined()
   await ui.press({ key: 'chat-grupo' })
 
-  // Naming someone asks only them, and they must answer.
+  // Naming someone asks only them, and they must answer; @dev is both engineers.
   await ui.input({ key: 'entrada-grupo-0', text: '@po @dev ¿empezamos?' })
-  expect(prompts.length).toBe(4)
+  expect(prompts.length).toBe(5)
   expect(prompts[2]).toContain('agente Product Owner')
-  expect(prompts[3]).toContain('agente Ingeniería')
+  expect(prompts[3]).toContain('agente Backend del')
+  expect(prompts[4]).toContain('agente Frontend del')
   expect(prompts[2]).not.toContain('PASO')
 
-  // Naming nobody asks all eight; one with nothing to add stays quiet.
-  await ui.input({ key: 'entrada-grupo-3', text: 'Hola equipo' })
-  expect(prompts.length).toBe(12)
-  expect(prompts[4]).toContain('chat de grupo')
-  expect(prompts[4]).toContain('una o dos frases cortas')
-  expect(await ui.find({ type: 'Markdown', text: /PASO/ })).toBeUndefined()
+  // Naming nobody, a quick pick chooses who answers: two at most.
+  await ui.input({ key: 'entrada-grupo-1', text: 'Hola equipo' })
+  expect(picks.length).toBe(1)
+  expect(picks[0]).toContain('Hola equipo')
+  expect(prompts.length).toBe(7)
+  expect(prompts[5]).toContain('agente Diseño UX/UI')
+  expect(prompts[6]).toContain('agente QA')
+  expect(prompts[5]).toContain('25 palabras como mucho')
   expect(await ui.find({ type: 'Markdown', text: /Respuesta de Diseño UX\/UI/ })).toBeDefined()
+
+  // Emptying the chat clears its lines.
+  await ui.press({ key: 'vaciar' })
+  expect(await ui.find({ type: 'Markdown', text: /Respuesta de/ })).toBeUndefined()
 
   // The chat on mobile is read only.
   await ui.unmount()
@@ -216,8 +231,9 @@ test('los agentes se escriben en el chat de grupo', async ($, on) => {
   expect(await ui.find({ type: 'Markdown', text: /^@po ¿qué priorizamos\?$/ })).toBeDefined()
   expect(await ui.find({ type: 'Markdown', text: /Primero el bloque 2/ })).toBeDefined()
 
-  // Agents who keep naming each other stop after a few hops.
-  await ui.input({ key: 'entrada-grupo-2', text: '@qa ¿cómo vas?' })
+  // Agents who keep naming each other stop after a few hops and answers:
+  // QA asks both engineers (@dev), they ask QA back, and QA answers once more.
+  await ui.input({ key: 'entrada-grupo-0', text: '@qa ¿cómo vas?' })
   expect(prompts.length).toBe(6)
   expect(prompts[3]).toContain('Mensaje nuevo del agente QA')
   expect(prompts[5]).toContain('No nombres a otros agentes')
