@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, TurnStepInput } from 'claude-code'
 
 import type { AgentRun, ChatMessage, RunStatus, TeamFilter } from '../types'
 
@@ -18,6 +18,8 @@ const filter = atom({ plugin: 'panel-agentes', key: 'filter' } as const, 'todos'
 const menu = atom({ plugin: 'panel-agentes', key: 'menu' } as const, null)
 const showAll = atom({ plugin: 'panel-agentes', key: 'showAll' } as const, false)
 const modelsShown = atom({ plugin: 'panel-agentes', key: 'models' } as const, {})
+const effortsShown = atom({ plugin: 'panel-agentes', key: 'efforts' } as const, {})
+const paused = atom({ plugin: 'panel-agentes', key: 'paused' } as const, [])
 
 // The team in the order the coordinador skill hands work along, with the
 // short names an @mention in the group chat may use.
@@ -81,10 +83,28 @@ const modelLabel = (value: string) =>
   MODELS.find(one => one.value === value)?.label ??
   value
 
-const readModels = async ($: EngineInterface): Promise<Record<string, string>> => {
-  const value = await $.store.get(MODELS_KEY)
+// How hard each role's model thinks, chosen and kept the same way. It is set
+// on each model request of the agent's, where its model takes an effort.
+const EFFORTS_KEY = 'esfuerzos'
+const EFFORTS: { value: string; label: string }[] = [
+  { value: '', label: 'Predeterminado' },
+  { value: 'low', label: 'Bajo' },
+  { value: 'medium', label: 'Medio' },
+  { value: 'high', label: 'Alto' },
+  { value: 'xhigh', label: 'Muy alto' },
+  { value: 'max', label: 'Máximo' },
+]
+
+const AGENT_EFFORTS = [{ value: '', label: 'Como el equipo' }, ...EFFORTS.slice(1)]
+
+const effortLabel = (value: string) => EFFORTS.find(one => one.value === value)?.label ?? value
+
+const readChoices = async ($: EngineInterface, key: string): Promise<Record<string, string>> => {
+  const value = await $.store.get(key)
   return value !== null && typeof value === 'object' ? (value as Record<string, string>) : {}
 }
+
+const readModels = ($: EngineInterface) => readChoices($, MODELS_KEY)
 
 const setModel = async ($: EngineInterface, role: string, model: string) => {
   const models = { ...(await readModels($)) }
@@ -92,6 +112,38 @@ const setModel = async ($: EngineInterface, role: string, model: string) => {
   else models[role] = model
   await $.store.set(MODELS_KEY, models)
   await update($, modelsShown, () => models)
+}
+
+const setEffort = async ($: EngineInterface, role: string, effort: string) => {
+  const efforts = { ...(await readChoices($, EFFORTS_KEY)) }
+  if (effort === '') delete efforts[role]
+  else efforts[role] = effort
+  await $.store.set(EFFORTS_KEY, efforts)
+  await update($, effortsShown, () => efforts)
+}
+
+// Stopping. The panel cannot end an agent's loop, but it can refuse every
+// tool call the agent makes from then on, with a note telling it to wrap up:
+// it ends within a step or two. A role on pause is stopped the same way, and
+// a new agent of it is refused until the person resumes it.
+const HALT = 'El usuario paró a este agente desde el panel de agentes. No sigas trabajando: termina ya con un resumen breve de lo que hiciste y lo que falta.'
+
+const isPaused = (list: string[], role: string) => list.includes(ALL) || list.includes(role)
+
+const halt = ($: EngineInterface, role?: string) =>
+  update($, runs, list =>
+    list.map(one =>
+      one.status === 'trabajando' && (role === undefined || one.role === role)
+        ? { ...one, isHalted: true as const }
+        : one,
+    ),
+  )
+
+const togglePause = async ($: EngineInterface, role: string) => {
+  const now = await read($, paused)
+  const isOn = now.includes(role)
+  await update($, paused, list => (isOn ? list.filter(one => one !== role) : [...list, role]))
+  if (!isOn) await halt($, role === ALL ? undefined : role)
 }
 
 const STATUS_TEXT: Record<RunStatus, string> = {
@@ -109,6 +161,8 @@ const PILL: Record<RunStatus | 'libre', { icon: string; text: string; color: 'wa
   interrumpido: { icon: '■', text: 'Interrumpido', color: 'inactive' },
   libre: { icon: '○', text: 'Disponible', color: 'inactive' },
 }
+
+const PAUSED_PILL = { icon: '⏸', text: 'En pausa', color: 'warning' } as const
 
 // A delivery's title: its task without the role's own prefix ("BA: …").
 const titleOf = (run: AgentRun) => {
@@ -202,26 +256,52 @@ const workOf = (role: string, list: AgentRun[]) => {
     .join('\n')
 }
 
-const chatPrompt = (role: string, channel: string, history: ChatMessage[], text: string, mustAnswer: boolean, work: string) => {
+// Agents reach each other through the group chat. In its own chat a role
+// that must ask another writes a line opening with TO_GROUP; the panel posts
+// it in the group, and whoever it names with @ answers there. A reply in the
+// group that names others with @ is answered the same way. HOPS bounds how
+// far one message of the person's can travel from agent to agent, and
+// RELAYS how many answers between agents it can start in all.
+const TO_GROUP = /^[\s*_]*al grupo[\s*_]*:[\s*_]*/i
+const HOPS = 3
+const RELAYS = 8
+
+const chatPrompt = (
+  role: string,
+  channel: string,
+  history: ChatMessage[],
+  text: string,
+  from: string,
+  mustAnswer: boolean,
+  canReach: boolean,
+  work: string,
+) => {
   const isGroup = channel === GROUP
   const member = TEAM.find(one => one.role === role)
   const team = TEAM.map(one => `${one.label} (@${one.aliases[0]})`).join(', ')
+  const writer = from === ME ? 'del usuario' : `del agente ${labelOf(from)}`
+  const reach = !canReach
+    ? 'No nombres a otros agentes con @ en esta respuesta.'
+    : isGroup
+      ? 'Si necesitas que otro agente te conteste, nómbralo con @. Usa @ solo para eso, no para mencionar a alguien de pasada. Si te escribe otro agente, contéstale; no le devuelvas la pregunta salvo que de verdad necesites algo.'
+      : `Si el usuario te pide hablar con otro agente, o necesitas algo de otro, añade al final una línea que empiece por «AL GRUPO:» con el mensaje para el chat de grupo, nombrando con @ a quien va dirigido. El equipo: ${team}. Ese agente te contestará en el chat de grupo.`
   return [
     `A partir de aquí no eres el asistente principal: eres el agente ${labelOf(role)} del Agent Control Center, que se ocupa de ${member?.job ?? 'su rol'}.`,
     isGroup
-      ? `El usuario te escribe en el chat de grupo del panel de agentes, con todo el equipo: ${team}.`
-      : 'El usuario te escribe por tu chat en el panel de agentes.',
+      ? `Estás en el chat de grupo del panel de agentes, con el usuario y todo el equipo: ${team}.`
+      : 'Estás en tu chat con el usuario en el panel de agentes.',
     `Lo que has hecho en esta sesión:\n${work}`,
     // Answers in the pane read as chat lines: short, plain text, no report.
     isGroup
       ? 'Responde en español como en un chat de grupo: una o dos frases cortas, sin listas, títulos ni negritas, en primera persona y desde tu rol. No repitas lo que ya dijo otro agente.'
       : 'Responde en español como en un chat: de una a tres frases cortas, sin listas, títulos ni negritas, en primera persona y desde tu rol.',
-    'Da más detalle solo si el usuario lo pide. Usa lo que sabes de la conversación y del proyecto. En este chat no tienes herramientas: si hace falta hacer algo, dilo y sugiere pedírselo a Claude.',
+    'Da más detalle solo si te lo piden. Usa lo que sabes de la conversación y del proyecto. En este chat no tienes herramientas: si hace falta hacer algo, dilo y sugiere pedírselo a Claude.',
+    reach,
     isGroup && !mustAnswer
       ? `Si desde tu rol no tienes nada útil que aportar a este mensaje, responde solo con la palabra ${PASS}.`
       : '',
     history.length > 0 ? `Chat hasta ahora:\n\n${transcript(history)}` : '',
-    `Mensaje nuevo del usuario:\n\n${text}`,
+    `Mensaje nuevo ${writer}:\n\n${text}`,
   ]
     .filter(Boolean)
     .join('\n\n')
@@ -234,39 +314,95 @@ const answerAs = async ($: EngineInterface, role: string, prompt: string) => {
   return $.model.complete({ model: models[role] || models[ALL] || 'sonnet', prompt })
 }
 
+// The roles a message of another agent's names with @, never the writer.
+const reached = (text: string, writer: string) => {
+  const { roles, isNamed } = addressed(text)
+  return isNamed ? roles.filter(role => role !== writer) : []
+}
+
+// As many of the roles as the budget still allows, spending it.
+const take = (roles: string[], budget: { left: number }) => {
+  const taken = roles.slice(0, Math.max(0, budget.left))
+  budget.left -= taken.length
+  return taken
+}
+
 const send = async ($: EngineInterface, channel: string, text: string) => {
   const said = text.trim()
   if (said === '') return
   const history = (await read($, chat)).filter(one => one.channel === channel)
-  const list = await read($, runs)
   const { roles, isNamed } =
     channel === GROUP ? addressed(said) : { roles: [channel], isNamed: true }
+  await update($, chat, lines => [...lines, { id: crypto.randomUUID(), channel, from: ME, text: said }])
+  await ask($, channel, roles, history, said, ME, isNamed, 0, { left: RELAYS })
+}
+
+// Each role answers one message in a channel; what they say to others is
+// passed on, a hop further.
+const ask = async (
+  $: EngineInterface,
+  channel: string,
+  roles: string[],
+  history: ChatMessage[],
+  text: string,
+  from: string,
+  mustAnswer: boolean,
+  hop: number,
+  budget: { left: number },
+) => {
+  const list = await read($, runs)
+  const canReach = hop < HOPS
   const waiting = roles.map(role => ({ role, id: crypto.randomUUID() }))
   await update($, chat, lines => [
     ...lines,
-    { id: crypto.randomUUID(), channel, from: ME, text: said },
     ...waiting.map(({ role, id }) => ({ id, channel, from: role, text: '', isPending: true })),
   ])
 
   await Promise.all(
     waiting.map(async ({ role, id }) => {
-      const prompt = chatPrompt(role, channel, history, said, isNamed, workOf(role, list))
+      const prompt = chatPrompt(role, channel, history, text, from, mustAnswer, canReach, workOf(role, list))
       const reply = await answerAs($, role, prompt).catch((error: unknown) => ({
         isAnswered: false as const,
         reason: String(error),
       }))
       const answer = reply.isAnswered ? reply.text.trim() : ''
       const isPass = answer === PASS || answer === `${PASS}.`
-      await update($, chat, lines =>
-        lines.flatMap(one => {
+
+      // In its own chat, the line for the group leaves the reply.
+      const lines = answer.split('\n')
+      const at = channel === GROUP || !canReach ? -1 : lines.findIndex(line => TO_GROUP.test(line))
+      const toGroup = at < 0 ? '' : lines.slice(at).join('\n').replace(TO_GROUP, '').trim()
+      const kept = at < 0 ? answer : lines.slice(0, at).join('\n').trim()
+      const shown = toGroup === '' ? kept : `${kept}\n\n_Le escribí al chat de grupo: «${toGroup}»_`.trim()
+
+      await update($, chat, all =>
+        all.flatMap(one => {
           if (one.id !== id) return [one]
           if (isPass) return []
           const said = reply.isAnswered
-            ? answer || '_Sin respuesta._'
+            ? shown || '_Sin respuesta._'
             : `_No pude contestar (${reply.reason})._`
           return [{ id, channel, from: role, text: said }]
         }),
       )
+      if (!canReach || isPass || !reply.isAnswered) return
+
+      if (toGroup !== '') {
+        const before = (await read($, chat)).filter(one => one.channel === GROUP)
+        await update($, chat, all => [
+          ...all,
+          { id: crypto.randomUUID(), channel: GROUP, from: role, text: toGroup },
+        ])
+        const targets = take(reached(toGroup, role), budget)
+        if (targets.length > 0) await ask($, GROUP, targets, before, toGroup, role, true, hop + 1, budget)
+        return
+      }
+      if (channel === GROUP) {
+        const targets = take(reached(answer, role), budget)
+        if (targets.length === 0) return
+        const before = (await read($, chat)).filter(one => one.channel === GROUP && one.id !== id)
+        await ask($, GROUP, targets, before, answer, role, true, hop + 1, budget)
+      }
     }),
   )
 }
@@ -275,6 +411,8 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const kept = await readModels($)
     await update($, modelsShown, () => kept)
+    const keptEfforts = await readChoices($, EFFORTS_KEY)
+    await update($, effortsShown, () => keptEfforts)
     await $.command.register({
       name: 'panel-agentes',
       description: 'Abre el panel de agentes del Agent Control Center',
@@ -291,8 +429,16 @@ export const register: Register = on => {
 
   on('agent.spawn', async ($, e, next) => {
     const role = roleOf(e.subagentType)
-    const models = TEAM.some(one => one.role === role) ? await readModels($) : {}
+    const isMember = TEAM.some(one => one.role === role)
+    if (isMember && isPaused(await read($, paused), role)) {
+      return {
+        deny: `El usuario puso en pausa a ${labelOf(role)} desde el panel de agentes. No lo lances hasta que lo reanude; si hace falta, pregúntale.`,
+      }
+    }
+    const models = isMember ? await readModels($) : {}
+    const efforts = isMember ? await readChoices($, EFFORTS_KEY) : {}
     const chosen = models[role] || models[ALL] || undefined
+    const effort = efforts[role] || efforts[ALL] || undefined
     const started = await next(chosen ? { ...e, model: chosen } : e)
     if (started.deny !== undefined || started.agentId === undefined) return started
 
@@ -309,6 +455,7 @@ export const register: Register = on => {
         status: 'trabajando',
         tools: 0,
         model: chosen ?? started.model,
+        effort,
       }
       await update($, runs, list => [...list, run].slice(-50))
     }
@@ -320,6 +467,8 @@ export const register: Register = on => {
   on('tool.call', async ($, e, next) => {
     const agentId = e.agentId
     if (agentId !== undefined) {
+      const run = (await read($, runs)).find(one => one.id === agentId)
+      if (run?.isHalted) return { deny: HALT }
       await update($, runs, list =>
         list.map(one =>
           one.id === agentId ? { ...one, tools: one.tools + 1, lastTool: e.tool } : one,
@@ -328,6 +477,15 @@ export const register: Register = on => {
     }
 
     return next(e)
+  })
+
+  on('turn.step', async function* ($, e, next) {
+    const agentId = e.agentId
+    // A model that takes no effort has none here, and is sent none.
+    if (agentId === undefined || e.effort === undefined) return yield* next(e)
+    const run = (await read($, runs)).find(one => one.id === agentId)
+    const effort = run?.effort as TurnStepInput['effort']
+    return yield* next(effort ? { ...e, effort } : e)
   })
 
   on('turn.complete', async ($, e, next) => {
@@ -340,7 +498,7 @@ export const register: Register = on => {
           one.id === agentId
             ? {
                 ...one,
-                status,
+                status: one.isHalted ? 'interrumpido' : status,
                 durationMs: (one.durationMs ?? 0) + e.durationMs,
                 report: e.answer || one.report,
               }
@@ -371,7 +529,7 @@ export const register: Register = on => {
         <Text>{GLYPHS[name] ?? '•'}</Text>
       )
     const tile = (name: string) => (
-      <Box borderStyle="round" borderColor="inactive" paddingX={1} alignSelf="flex-start">
+      <Box borderStyle="round" borderColor="inactive" paddingX={1} alignSelf="flex-start" flexShrink={0}>
         {icon(name)}
       </Box>
     )
@@ -438,6 +596,10 @@ export const register: Register = on => {
     const isAll = await read($, showAll)
     const models = await read($, modelsShown)
     const teamModel = models[ALL] ?? ''
+    const efforts = await read($, effortsShown)
+    const teamEffort = efforts[ALL] ?? ''
+    const onPause = await read($, paused)
+    const isTeamPaused = onPause.includes(ALL)
 
     const stateOf = (role: string) => {
       const mine = list.filter(one => one.role === role)
@@ -459,9 +621,11 @@ export const register: Register = on => {
       return true
     })
 
-    // Two cards a row where the pane is wide enough, one otherwise.
-    const perRow = width >= 56 ? 2 : 1
+    // Two cards a row only where each still fits its name beside its status;
+    // a narrower card puts the status under the name instead.
+    const perRow = width >= 70 ? 2 : 1
     const cardWidth = Math.floor((width - (perRow - 1)) / perRow)
+    const isCompact = cardWidth < 36
 
     const picker = (key: string, value: string, options: { value: string; label: string }[], label: string, pick: (value: string) => unknown) =>
       Select ? (
@@ -482,10 +646,16 @@ export const register: Register = on => {
     const cards = shown.map(member => {
       const { mine, last } = stateOf(member.role)
       const status = last?.status
-      const pill = PILL[status ?? 'libre']
+      const isWorking = status === 'trabajando'
+      const isHalted = isWorking && mine.some(one => one.status === 'trabajando' && one.isHalted)
+      const isOnPause = isPaused(onPause, member.role)
+      const pill = isOnPause && !isWorking ? PAUSED_PILL : PILL[status ?? 'libre']
       const own = models[member.role] ?? ''
+      const ownEffort = efforts[member.role] ?? ''
       const subtitle =
-        status === 'trabajando' && last
+        isHalted
+          ? 'Parando…'
+          : status === 'trabajando' && last
           ? `${last.task}${last.lastTool ? ` · ${last.lastTool}` : ''}`
           : status && last
             ? `${STATUS_TEXT[status]}${last.durationMs !== undefined ? ` · ${duration(last.durationMs)}` : ''}`
@@ -504,14 +674,21 @@ export const register: Register = on => {
           padding={1}
         >
           {tile(member.role)}
-          <Box flexDirection="column" flexGrow={1} flexShrink={1} gap={1}>
-            <Box flexDirection="row" justifyContent="space-between" gap={1}>
-              <Text bold wrap="truncate-end">
-                {member.label}
-                {mine.length > 1 ? ` ×${mine.length}` : ''}
-              </Text>
-              <Box borderStyle="round" borderColor={pill.color} paddingX={1}>
-                <Text color={pill.color} size="caption">
+          <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} gap={1}>
+            <Box
+              flexDirection={isCompact ? 'column' : 'row'}
+              justifyContent="space-between"
+              alignItems={isCompact ? 'flex-start' : 'center'}
+              gap={1}
+            >
+              <Box flexShrink={1} minWidth={0}>
+                <Text bold wrap="truncate-end">
+                  {member.label}
+                  {mine.length > 1 ? ` ×${mine.length}` : ''}
+                </Text>
+              </Box>
+              <Box borderStyle="round" borderColor={pill.color} paddingX={1} flexShrink={0}>
+                <Text color={pill.color} size="caption" wrap="truncate-end">
                   {pill.icon} {pill.text}
                 </Text>
               </Box>
@@ -526,10 +703,15 @@ export const register: Register = on => {
                 </Box>
               </Box>
             )}
-            <Box flexDirection="row" justifyContent="space-between">
+            <Box flexDirection="row" flexWrap="wrap" justifyContent="space-between" gap={1}>
               <Button key={`chat-${member.role}`} plain onPress={() => update($, view, () => member.role)}>
                 Abrir chat →
               </Button>
+              {isWorking && !isHalted && (
+                <Button key={`parar-${member.role}`} plain onPress={() => halt($, member.role)}>
+                  <Text color="error">■ Parar</Text>
+                </Button>
+              )}
               <Button
                 key={`menu-${member.role}`}
                 plain
@@ -540,6 +722,13 @@ export const register: Register = on => {
             </Box>
             {menuOf === member.role &&
               picker(`modelo-${member.role}`, own, AGENT_MODELS, 'Modelo', value => setModel($, member.role, value))}
+            {menuOf === member.role &&
+              picker(`esfuerzo-${member.role}`, ownEffort, AGENT_EFFORTS, 'Esfuerzo', value => setEffort($, member.role, value))}
+            {menuOf === member.role && !isTeamPaused && (
+              <Button key={`pausa-${member.role}`} plain onPress={() => togglePause($, member.role)}>
+                {onPause.includes(member.role) ? '▶ Reanudar' : '⏸ Pausar'}
+              </Button>
+            )}
           </Box>
         </Box>
       )
@@ -570,6 +759,14 @@ export const register: Register = on => {
           <Button key="chat-grupo" variant="primary" onPress={() => update($, view, () => GROUP)}>
             💬 Chat de grupo
           </Button>
+          {counts['en-curso'] > 0 && (
+            <Button key="parar-todos" onPress={() => halt($)}>
+              <Text color="error">■ Parar todos</Text>
+            </Button>
+          )}
+          <Button key="pausa-todos" onPress={() => togglePause($, ALL)}>
+            {isTeamPaused ? '▶ Reanudar equipo' : '⏸ Pausar equipo'}
+          </Button>
           <Text>
             {TEAM.length} roles · <Text color="warning">●</Text> {counts['en-curso']} en curso ·{' '}
             <Text color="success">●</Text> {counts.completados} completados ·{' '}
@@ -584,8 +781,14 @@ export const register: Register = on => {
               Equipo
             </Text>
           </Box>
-          {picker('modelo-todos', teamModel, MODELS, 'Modelo', value => setModel($, ALL, value))}
+          <Box flexDirection="row" flexWrap="wrap" gap={1}>
+            {picker('modelo-todos', teamModel, MODELS, 'Modelo', value => setModel($, ALL, value))}
+            {picker('esfuerzo-todos', teamEffort, EFFORTS, 'Esfuerzo', value => setEffort($, ALL, value))}
+          </Box>
         </Box>
+        {isTeamPaused && (
+          <Text color="warning">⏸ El equipo está en pausa: Claude no puede lanzar agentes hasta que lo reanudes.</Text>
+        )}
         <Box flexDirection="row" flexWrap="wrap" gap={2}>
           {tabs.map(one => (
             <Button key={`pestana-${one.id}`} plain onPress={() => update($, filter, () => one.id)}>
@@ -622,6 +825,7 @@ export const register: Register = on => {
           const facts = [
             labelOf(run.role),
             run.model ? modelLabel(run.model) : '',
+            run.effort ? `esfuerzo ${effortLabel(run.effort).toLowerCase()}` : '',
             duration(run.durationMs),
             `${run.tools} herramientas`,
           ]
