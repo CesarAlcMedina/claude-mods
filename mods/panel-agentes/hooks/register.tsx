@@ -24,6 +24,7 @@ const effortsShown = atom({ plugin: 'panel-agentes', key: 'efforts' } as const, 
 const paused = atom({ plugin: 'panel-agentes', key: 'paused' } as const, [])
 const earlier = atom({ plugin: 'panel-agentes', key: 'earlier' } as const, false)
 const requests = atom({ plugin: 'panel-agentes', key: 'requests' } as const, [])
+const notice = atom({ plugin: 'panel-agentes', key: 'notice' } as const, null)
 
 // The team in the order the coordinador skill hands work along, with the
 // short names an @mention in the group chat may use.
@@ -147,25 +148,59 @@ const setEffort = async ($: EngineInterface, role: string, effort: string) => {
 // Stopping. The panel cannot end an agent's loop, but it can refuse every
 // tool call the agent makes from then on, with a note telling it to wrap up:
 // it ends within a step or two. A role on pause is stopped the same way, and
-// a new agent of it is refused until the person resumes it.
+// a new agent of it is refused until the person resumes it. Nor can the panel
+// hold an agent and let it go on: a paused one ends saying where it left
+// off, and resuming hands that work back to the main session, which goes on
+// with it as the person's own request once they send the order.
 const HALT = 'El usuario paró a este agente desde el panel de agentes. No sigas trabajando: termina ya con un resumen breve de lo que hiciste y lo que falta.'
+const PAUSE = 'El usuario puso en pausa a este agente desde el panel de agentes. Detente ya: termina con un resumen breve de lo que hiciste, lo que falta y dónde lo dejaste, para poder seguir después desde ahí.'
 
 const isPaused = (list: string[], role: string) => list.includes(ALL) || list.includes(role)
 
-const halt = ($: EngineInterface, role?: string) =>
+const halt = ($: EngineInterface, role?: string, isPause = false) =>
   update($, runs, list =>
     list.map(one =>
       one.status === 'trabajando' && (role === undefined || one.role === role)
-        ? { ...one, isHalted: true as const }
+        ? { ...one, isHalted: true as const, ...(isPause ? { isPaused: true as const } : {}) }
         : one,
     ),
   )
+
+// Work a pause cut short and not yet handed back: the role's, or all of it.
+const cutShort = (list: AgentRun[], role: string) =>
+  list.filter(
+    one => one.isPaused && !one.isResumed && one.status !== 'trabajando' && (role === ALL || one.role === role),
+  )
+
+// Resuming: the work the pause cut short goes back to the main session. The
+// order waits in the prompt box for the person's Enter.
+const resume = async ($: EngineInterface, role: string) => {
+  const left = cutShort(await read($, runs), role)
+  if (left.length === 0) return
+  const each = left
+    .map(run => {
+      const where = run.report ? ` Dónde lo dejó: ${summaryOf(run.report)}` : ''
+      return `- ${labelOf(run.role)} (agente ${run.id}), tarea «${run.task}».${where}`
+    })
+    .join('\n')
+  const order = `Reanuda el trabajo que quedó en pausa desde el panel de agentes. Sigue con cada agente donde lo dejó, sin empezar de cero: continúa el mismo agente si puedes y, si no, lánzalo otra vez con su tarea y lo que ya hizo.\n${each}`
+  const filled = await $.prompt.fill({ text: order }).catch(() => ({ isFilled: false }))
+  const ids = left.map(one => one.id)
+  await update($, runs, list => list.map(one => (ids.includes(one.id) ? { ...one, isResumed: true as const } : one)))
+  const who = left.map(one => labelOf(one.role)).filter((one, at, all) => all.indexOf(one) === at).join(', ')
+  await update($, notice, () =>
+    filled.isFilled
+      ? `Para que ${who} siga donde lo dejó, te dejé la orden en la caja del chat principal: envíala con Enter.`
+      : `Para que ${who} siga donde lo dejó, envía esto en el chat principal:\n\n${order}`,
+  )
+}
 
 const togglePause = async ($: EngineInterface, role: string) => {
   const now = await read($, paused)
   const isOn = now.includes(role)
   await update($, paused, list => (isOn ? list.filter(one => one !== role) : [...list, role]))
-  if (!isOn) await halt($, role === ALL ? undefined : role)
+  if (!isOn) await halt($, role === ALL ? undefined : role, true)
+  else await resume($, role)
 }
 
 const STATUS_TEXT: Record<RunStatus, string> = {
@@ -810,9 +845,15 @@ export const register: Register = on => {
 
     const id = started.agentId
     if (e.resume !== undefined) {
+      // Going on with it: it is no longer stopped.
       await update($, runs, list =>
-        list.map(one => (one.id === id ? { ...one, status: 'trabajando' } : one)),
+        list.map(one => {
+          if (one.id !== id) return one
+          const { isHalted: _halted, isPaused: _paused, isResumed: _resumed, ...rest } = one
+          return { ...rest, status: 'trabajando' as const }
+        }),
       )
+      await update($, notice, () => null)
     } else {
       const run: AgentRun = {
         id,
@@ -825,6 +866,7 @@ export const register: Register = on => {
         startedAt: Date.now(),
       }
       await update($, runs, list => [...list, run].slice(-50))
+      if (cutShort(await read($, runs), role).length === 0) await update($, notice, () => null)
     }
     void $.ui.open({ id: PANE, title: TITLE })
 
@@ -835,7 +877,7 @@ export const register: Register = on => {
     const agentId = e.agentId
     if (agentId !== undefined) {
       const run = (await read($, runs)).find(one => one.id === agentId)
-      if (run?.isHalted) return { deny: HALT }
+      if (run?.isHalted) return { deny: run.isPaused ? PAUSE : HALT }
       await update($, runs, list =>
         list.map(one =>
           one.id === agentId ? { ...one, tools: one.tools + 1, lastTool: e.tool } : one,
@@ -1058,6 +1100,7 @@ export const register: Register = on => {
     const efforts = await read($, effortsShown)
     const teamEffort = efforts[ALL] ?? ''
     const onPause = await read($, paused)
+    const told = await read($, notice)
     const isTeamPaused = onPause.includes(ALL)
 
     const stateOf = (role: string) => {
@@ -1111,11 +1154,14 @@ export const register: Register = on => {
       const isWorking = status === 'trabajando'
       const isHalted = isWorking && mine.some(one => one.status === 'trabajando' && one.isHalted)
       const isOnPause = isPaused(onPause, member.role)
+      const isCutShort = !isWorking && last?.isPaused === true
       const pill = isHalted
-        ? { icon: '●', text: 'Parando…', color: 'warning' as const }
+        ? { icon: '●', text: last?.isPaused ? 'Pausando…' : 'Parando…', color: 'warning' as const }
         : isOnPause && !isWorking
           ? PAUSED_PILL
-          : PILL[status ?? 'libre']
+          : isCutShort
+            ? { icon: '⏸', text: last?.isResumed ? 'Listo para seguir' : 'En pausa', color: 'warning' as const }
+            : PILL[status ?? 'libre']
       const own = models[member.role] ?? ''
       const ownEffort = efforts[member.role] ?? ''
       const took = !isWorking && last?.durationMs !== undefined ? duration(last.durationMs) : ''
@@ -1268,6 +1314,16 @@ export const register: Register = on => {
         </Box>
         {isTeamPaused && (
           <Text color="warning">⏸ El equipo está en pausa: Claude no puede lanzar agentes hasta que lo reanudes.</Text>
+        )}
+        {told !== null && (
+          <Box key="aviso" flexDirection="row" justifyContent="space-between" gap={1} borderStyle="round" borderColor="warning" paddingX={1}>
+            <Box flexShrink={1}>
+              <Markdown text={told} />
+            </Box>
+            <Button key="cerrar-aviso" plain onPress={() => update($, notice, () => null)}>
+              <Text dimColor>✕</Text>
+            </Button>
+          </Box>
         )}
 
         {coordinator}

@@ -14,6 +14,10 @@ export type AgentRun = {
   report?: string
   /** Stopped from the panel: its tool calls are refused until it ends. */
   isHalted?: true
+  /** Stopped by a pause, to pick up where it left off once resumed. */
+  isPaused?: true
+  /** Its work was handed back to the main session to go on with. */
+  isResumed?: true
   /** When it started, to tell which request of the panel's it answers. */
   startedAt?: number
 }
@@ -68,6 +72,8 @@ declare module 'claude-code' {
       /** The open chat shows its earlier messages too, not only the last ones. */
       earlier: boolean
       requests: PanelRequest[]
+      /** A line for the person above the team, such as an order left to send. */
+      notice: string | null
     }
   }
 }
