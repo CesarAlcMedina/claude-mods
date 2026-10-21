@@ -529,7 +529,7 @@ export const register: Register = on => {
         <Text>{GLYPHS[name] ?? '•'}</Text>
       )
     const tile = (name: string) => (
-      <Box borderStyle="round" borderColor="inactive" paddingX={1} alignSelf="flex-start">
+      <Box borderStyle="round" borderColor="inactive" paddingX={1} alignSelf="flex-start" flexShrink={0}>
         {icon(name)}
       </Box>
     )
@@ -621,9 +621,11 @@ export const register: Register = on => {
       return true
     })
 
-    // Two cards a row where the pane is wide enough, one otherwise.
-    const perRow = width >= 56 ? 2 : 1
+    // Two cards a row only where each still fits its name beside its status;
+    // a narrower card puts the status under the name instead.
+    const perRow = width >= 70 ? 2 : 1
     const cardWidth = Math.floor((width - (perRow - 1)) / perRow)
+    const isCompact = cardWidth < 36
 
     const picker = (key: string, value: string, options: { value: string; label: string }[], label: string, pick: (value: string) => unknown) =>
       Select ? (
@@ -672,14 +674,21 @@ export const register: Register = on => {
           padding={1}
         >
           {tile(member.role)}
-          <Box flexDirection="column" flexGrow={1} flexShrink={1} gap={1}>
-            <Box flexDirection="row" justifyContent="space-between" gap={1}>
-              <Text bold wrap="truncate-end">
-                {member.label}
-                {mine.length > 1 ? ` ×${mine.length}` : ''}
-              </Text>
-              <Box borderStyle="round" borderColor={pill.color} paddingX={1}>
-                <Text color={pill.color} size="caption">
+          <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} gap={1}>
+            <Box
+              flexDirection={isCompact ? 'column' : 'row'}
+              justifyContent="space-between"
+              alignItems={isCompact ? 'flex-start' : 'center'}
+              gap={1}
+            >
+              <Box flexShrink={1} minWidth={0}>
+                <Text bold wrap="truncate-end">
+                  {member.label}
+                  {mine.length > 1 ? ` ×${mine.length}` : ''}
+                </Text>
+              </Box>
+              <Box borderStyle="round" borderColor={pill.color} paddingX={1} flexShrink={0}>
+                <Text color={pill.color} size="caption" wrap="truncate-end">
                   {pill.icon} {pill.text}
                 </Text>
               </Box>
@@ -694,7 +703,7 @@ export const register: Register = on => {
                 </Box>
               </Box>
             )}
-            <Box flexDirection="row" justifyContent="space-between" gap={1}>
+            <Box flexDirection="row" flexWrap="wrap" justifyContent="space-between" gap={1}>
               <Button key={`chat-${member.role}`} plain onPress={() => update($, view, () => member.role)}>
                 Abrir chat →
               </Button>

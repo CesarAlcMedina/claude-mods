@@ -299,3 +299,17 @@ test('el esfuerzo elegido, y parar o pausar a los agentes', async ($, on) => {
   expect(await spawn('product-owner')).toMatchObject({ agentId: 'a5' })
   await ui.unmount()
 })
+
+test('las tarjetas caben en un panel estrecho', async ($, on) => {
+  mock.store(on)
+  const at = async (bodyColumns: number) => {
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: { ...PANE.props, bodyColumns } })
+    const card = await ui.find({ key: 'tarjeta-business-analyst' })
+    await ui.unmount()
+    return card?.props
+  }
+  // Narrow: one card a row, the whole width.
+  expect(await at(60)).toMatchObject({ width: 60 })
+  // Wide: two a row, each wide enough for its name beside its status.
+  expect(await at(80)).toMatchObject({ width: 39 })
+})
