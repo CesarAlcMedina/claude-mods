@@ -73,6 +73,16 @@ export type ChatMessage = {
   isNote?: true
 }
 
+/** The plan's five-hour limit, as the API last reported it. */
+export type PlanUsage = {
+  /** 0 to 100, past 100 once exceeded. */
+  percent: number
+  /** When the window resets, in milliseconds since the epoch. */
+  resetsAt?: number
+  /** When the panel last saw this reading. */
+  seenAt: number
+}
+
 /** Which cards the team tabs show. */
 export type TeamFilter = 'todos' | 'en-curso' | 'completados' | 'disponibles'
 
@@ -107,6 +117,9 @@ declare module 'claude-code' {
       team: SessionTeam
       setup: TeamSetup | null
       offer: TeamOffer | null
+      usage: PlanUsage | null
+      /** Moves on a timer, to keep the countdown current. */
+      tick: number
     }
   }
 }

@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, TurnStepInput } from 'claude-code'
+import type { EngineInterface, Register, SessionRateLimit, TurnStepInput } from 'claude-code'
 
 import type { AgentRun, ChatMessage, RunStatus, SessionTeam, TeamFilter } from '../types'
 
@@ -28,6 +28,8 @@ const notice = atom({ plugin: 'panel-agentes', key: 'notice' } as const, null)
 const crewAtom = atom({ plugin: 'panel-agentes', key: 'team' } as const, { roles: [], leaving: [], joined: {}, isChosen: false })
 const setup = atom({ plugin: 'panel-agentes', key: 'setup' } as const, null)
 const offer = atom({ plugin: 'panel-agentes', key: 'offer' } as const, null)
+const planUsage = atom({ plugin: 'panel-agentes', key: 'usage' } as const, null)
+const tick = atom({ plugin: 'panel-agentes', key: 'tick' } as const, 0)
 
 // The team in the order the coordinador skill hands work along, with the
 // short names an @mention in the group chat may use.
@@ -333,6 +335,62 @@ const togglePause = async ($: EngineInterface, role: string) => {
   if (!isOn) await halt($, role === ALL ? undefined : role, true)
   else await resume($, role)
 }
+
+// The plan's five-hour limit, as the API last reported it to the session.
+// The engine pushes it with each measurement (after a main-thread turn, or
+// when the window moves a point); a timer keeps the countdown going and
+// rereads the free usage figures, never the model. A reading keeps when it
+// was seen: an old one says so, and one whose reset time has passed waits
+// for new data rather than claiming the window is back at zero.
+const FIVE_HOUR = 'five_hour'
+const TICK_MS = 30_000
+const STALE_MS = 15 * 60_000
+
+const nowOf = ($: EngineInterface) => $.clock.now().catch(() => Date.now())
+
+const record = async ($: EngineInterface, limits: SessionRateLimit[], isFresh: boolean) => {
+  const window = limits.find(one => one.kind === FIVE_HOUR)
+  if (window === undefined) return
+  const resetsAt = window.resetsAt ? Date.parse(window.resetsAt) : NaN
+  const reading = {
+    percent: window.percentUsed,
+    resetsAt: Number.isFinite(resetsAt) ? resetsAt : undefined,
+    seenAt: await nowOf($),
+  }
+  await update($, planUsage, last =>
+    !isFresh && last !== null && last.percent === reading.percent && last.resetsAt === reading.resetsAt
+      ? last
+      : reading,
+  )
+}
+
+// One timer per loaded copy of the module.
+let ticking: { cancel: () => void } | undefined
+
+const keepTicking = ($: EngineInterface) => {
+  if (ticking !== undefined) return
+  try {
+    ticking = $.clock.every(TICK_MS, () => {
+      void (async () => {
+        const usage = await $.session.usage().catch(() => undefined)
+        if (usage !== undefined) await record($, usage.rateLimits, false)
+        await update($, tick, n => n + 1)
+      })()
+    })
+  } catch {
+    ticking = undefined
+  }
+}
+
+const untilText = (ms: number) => {
+  const minutes = Math.ceil(ms / 60_000)
+  if (minutes <= 1) return 'menos de 1 min'
+  const hours = Math.floor(minutes / 60)
+  const rest = minutes % 60
+  return hours === 0 ? `${minutes} min` : `${hours} h${rest > 0 ? ` ${rest} min` : ''}`
+}
+
+const percentText = (value: number) => `${String(value).replace('.', ',')} %`
 
 const STATUS_TEXT: Record<RunStatus, string> = {
   trabajando: 'Trabajando',
@@ -1054,11 +1112,15 @@ export const register: Register = on => {
       name: 'panel-agentes',
       description: 'Abre el panel de agentes del Agent Control Center',
     })
+    const usage = await $.session.usage().catch(() => undefined)
+    if (usage !== undefined) await record($, usage.rateLimits, true)
+    keepTicking($)
 
     return next(e)
   })
 
   on('command.run', { command: 'panel-agentes' }, async $ => {
+    keepTicking($)
     await $.ui.open({ id: PANE, title: TITLE })
 
     return { text: 'Panel de agentes abierto.' }
@@ -1164,6 +1226,12 @@ export const register: Register = on => {
     return next({ ...e, context: [...(e.context ?? []), line] })
   })
 
+  // Each measurement brings the limit as the last response reported it.
+  on('session.measure', async ($, e, next) => {
+    await record($, e.rateLimits, true)
+    return next(e)
+  })
+
   on('turn.step', async function* ($, e, next) {
     const agentId = e.agentId
     // A model that takes no effort has none here, and is sent none.
@@ -1213,6 +1281,59 @@ export const register: Register = on => {
     const Svg = 'Svg' in elements ? elements.Svg : undefined
     const width = Math.max(20, e.props.bodyColumns)
     const showing = await read($, view)
+
+    // «Límite de sesión · 5 h», at the top of the team and of each chat.
+    await read($, tick)
+    const reading = await read($, planUsage)
+    const now = await nowOf($)
+    const limitBar = () => {
+      const cells = Math.max(10, width - 4)
+      const isReset = reading?.resetsAt !== undefined && now >= reading.resetsAt
+      const isStale = reading !== null && !isReset && now - reading.seenAt > STALE_MS
+      const percent = reading === null || isReset ? undefined : reading.percent
+      const filled = percent === undefined ? 0 : Math.min(cells, Math.round((Math.min(percent, 100) / 100) * cells) || (percent > 0 ? 1 : 0))
+      const color = percent === undefined ? 'inactive' : percent >= 90 ? 'error' : percent >= 70 ? 'warning' : TONE.accent
+      const caption =
+        reading === null
+          ? 'Uso no disponible'
+          : isReset
+            ? 'La ventana ya se restableció: esperando datos nuevos'
+            : [
+                reading.percent >= 100 ? 'Límite alcanzado' : '',
+                reading.resetsAt !== undefined
+                  ? `Se restablece en ${untilText(reading.resetsAt - now)}`
+                  : 'Hora de restablecimiento no disponible',
+                isStale ? `datos de hace ${untilText(now - reading.seenAt)}` : '',
+              ]
+                .filter(Boolean)
+                .join(' · ')
+      return (
+        <Box
+          key="limite-sesion"
+          flexDirection="column"
+          borderStyle="round"
+          borderColor={TONE.border}
+          backgroundColor={fill(TONE.card)}
+          paddingX={1}
+        >
+          <Box flexDirection="row" justifyContent="space-between" gap={1}>
+            <Text bold wrap="truncate-end">
+              Límite de sesión · 5 h
+            </Text>
+            <Text bold color={percent !== undefined && percent >= 90 ? 'error' : undefined} dimColor={percent === undefined}>
+              {percent === undefined ? '—' : percentText(percent)}
+            </Text>
+          </Box>
+          <Text wrap="truncate-end">
+            <Text color={color}>{'█'.repeat(filled)}</Text>
+            <Text color={TONE.border}>{'░'.repeat(cells - filled)}</Text>
+          </Text>
+          <Text dimColor={!isStale || reading === null} color={isStale ? 'warning' : undefined} size="caption">
+            {caption}
+          </Text>
+        </Box>
+      )
+    }
 
     const icon = (name: string, size = 22) =>
       Svg ? (
@@ -1267,6 +1388,7 @@ export const register: Register = on => {
       )
       return (
         <Box flexDirection="column" gap={1}>
+          {limitBar()}
           <Box flexDirection="row" flexWrap="wrap" justifyContent="space-between" alignItems="center" gap={1}>
             <Box flexDirection="row" gap={1} alignItems="center">
               {back('volver')}
@@ -1680,6 +1802,7 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column" gap={1}>
+        {limitBar()}
         <Box flexDirection="row" flexWrap="wrap" justifyContent="space-between" alignItems="center" gap={1}>
           <Box flexDirection="row" gap={1} alignItems="center">
             {icon('grupo', 18)}
