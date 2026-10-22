@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, SessionRateLimit, TurnStepInput } from 'claude-code'
 
-import type { AgentRun, ChatMessage, RunStatus, SessionTeam, TeamFilter } from '../types'
+import type { AgentRun, ChatMessage, PanelRequest, RequestStatus, RunStatus, SessionTeam, TeamFilter } from '../types'
 
 const PANE = 'panel-agentes'
 const TITLE = 'Agentes'
@@ -24,6 +24,7 @@ const effortsShown = atom({ plugin: 'panel-agentes', key: 'efforts' } as const, 
 const paused = atom({ plugin: 'panel-agentes', key: 'paused' } as const, [])
 const earlier = atom({ plugin: 'panel-agentes', key: 'earlier' } as const, false)
 const requests = atom({ plugin: 'panel-agentes', key: 'requests' } as const, [])
+const driving = atom({ plugin: 'panel-agentes', key: 'driving' } as const, null)
 const notice = atom({ plugin: 'panel-agentes', key: 'notice' } as const, null)
 const crewAtom = atom({ plugin: 'panel-agentes', key: 'team' } as const, { roles: [], leaving: [], joined: {}, isChosen: false })
 const setup = atom({ plugin: 'panel-agentes', key: 'setup' } as const, null)
@@ -52,13 +53,16 @@ const roleOf = (subagentType: string) =>
 const FORMER: Record<string, string> = { 'software-engineer': 'Ingeniería' }
 
 // The Coordinador is the main session itself, running agent-control-center's
-// coordinador skill: a subagent cannot launch others, so the flow is run
-// there, with the session's own permissions, and the panel hands it work
-// through the prompt box. In the group chat it takes every message that
-// names no agent.
+// coordinador skill: a subagent cannot launch others, and auto mode refuses
+// an agent the panel spawns itself, so the work is run there, with the
+// session's own permissions. The panel submits it as a prompt of its own,
+// which runs once the session is idle, and follows it to its result. In the
+// group chat the Coordinador takes every message that names no agent.
 const COORD = 'coordinador'
-const SKILL = '/agent-control-center:coordinador'
-const FROM_PANEL = 'Nueva función pedida desde el panel de agentes'
+const SKILL = 'agent-control-center:coordinador'
+const FROM_PANEL = 'Encargo del usuario desde el panel de agentes'
+// A request's id in its order, to know it again when it enters.
+const REQUEST_ID = /\(encargo ([0-9a-f]{8})\)/
 const ENGINEERS = ['backend-engineer', 'frontend-engineer', 'software-engineer']
 
 const labelOf = (role: string) =>
@@ -170,16 +174,17 @@ const settleBusy = async ($: EngineInterface, keep: boolean) => {
   await update($, setup, () => null)
 }
 
-// Roles out of the team never get a message on their own: the person is
-// offered to bring them in first, and they get it once in.
-const propose = ($: EngineInterface, channel: string, roles: string[], messageId?: string) =>
-  update($, offer, () => ({ channel, roles, messageId }))
+// Roles out of the team never get a message or work on their own: the
+// person is offered to bring them in first, and they get it once in.
+const propose = ($: EngineInterface, channel: string, roles: string[], messageId?: string, task?: string) =>
+  update($, offer, () => ({ channel, roles, messageId, task }))
 
 const accept = async ($: EngineInterface) => {
   const now = await read($, offer)
   if (now === null) return
   await update($, offer, () => null)
   await bringIn($, now.roles)
+  if (now.task !== undefined) return commission($, now.channel, now.task, now.roles)
   if (now.messageId === undefined) return
   const message = (await read($, chat)).find(one => one.id === now.messageId)
   if (message === undefined) return
@@ -192,7 +197,8 @@ const decline = async ($: EngineInterface) => {
   if (now === null) return
   await update($, offer, () => null)
   const one = now.roles.length === 1
-  const text = `${names(now.roles)} ${one ? 'sigue' : 'siguen'} fuera del equipo${now.messageId ? `: no ${one ? 'le' : 'les'} llegó el mensaje` : ''}.`
+  const lost = now.task !== undefined ? ': el encargo no se lanzó' : now.messageId ? `: no ${one ? 'le' : 'les'} llegó el mensaje` : ''
+  const text = `${names(now.roles)} ${one ? 'sigue' : 'siguen'} fuera del equipo${lost}.`
   await update($, chat, all => [...all, note(now.channel, text)])
 }
 
@@ -284,7 +290,7 @@ const setEffort = async ($: EngineInterface, role: string, effort: string) => {
 // a new agent of it is refused until the person resumes it. Nor can the panel
 // hold an agent and let it go on: a paused one ends saying where it left
 // off, and resuming hands that work back to the main session, which goes on
-// with it as the person's own request once they send the order.
+// with it.
 const HALT = 'El usuario paró a este agente desde el panel de agentes. No sigas trabajando: termina ya con un resumen breve de lo que hiciste y lo que falta.'
 const PAUSE = 'El usuario puso en pausa a este agente desde el panel de agentes. Detente ya: termina con un resumen breve de lo que hiciste, lo que falta y dónde lo dejaste, para poder seguir después desde ahí.'
 
@@ -305,8 +311,9 @@ const cutShort = (list: AgentRun[], role: string) =>
     one => one.isPaused && !one.isResumed && one.status !== 'trabajando' && (role === ALL || one.role === role),
   )
 
-// Resuming: the work the pause cut short goes back to the main session. The
-// order waits in the prompt box for the person's Enter.
+// Resuming: the work the pause cut short goes back to the main session, as
+// a prompt the panel submits. Where none can be submitted, the order waits in
+// the prompt box for the person's Enter.
 const resume = async ($: EngineInterface, role: string) => {
   const left = cutShort(await read($, runs), role)
   if (left.length === 0) return
@@ -317,15 +324,20 @@ const resume = async ($: EngineInterface, role: string) => {
     })
     .join('\n')
   const order = `Reanuda el trabajo que quedó en pausa desde el panel de agentes. Sigue con cada agente donde lo dejó, sin empezar de cero: continúa el mismo agente si puedes y, si no, lánzalo otra vez con su tarea y lo que ya hizo.\n${each}`
-  const filled = await $.prompt.fill({ text: order }).catch(() => ({ isFilled: false }))
   const ids = left.map(one => one.id)
   await update($, runs, list => list.map(one => (ids.includes(one.id) ? { ...one, isResumed: true as const } : one)))
   const who = left.map(one => labelOf(one.role)).filter((one, at, all) => all.indexOf(one) === at).join(', ')
-  await update($, notice, () =>
-    filled.isFilled
-      ? `Para que ${who} siga donde lo dejó, te dejé la orden en la caja del chat principal: envíala con Enter.`
-      : `Para que ${who} siga donde lo dejó, envía esto en el chat principal:\n\n${order}`,
-  )
+  await update($, notice, () => `Reanudando: ${who} sigue donde lo dejó en cuanto la sesión principal esté libre.`)
+  void (async () => {
+    const isSent = await $.prompt.submit({ text: order }).then(() => true, () => false)
+    if (isSent) return
+    const filled = await $.prompt.fill({ text: order }).catch(() => ({ isFilled: false }))
+    await update($, notice, () =>
+      filled.isFilled
+        ? `Para que ${who} siga donde lo dejó, te dejé la orden en la caja del chat principal: envíala con Enter.`
+        : `Para que ${who} siga donde lo dejó, envía esto en el chat principal:\n\n${order}`,
+    )
+  })()
 }
 
 const togglePause = async ($: EngineInterface, role: string) => {
@@ -548,13 +560,13 @@ const turnsOf = (text: string): Turn[] => {
 }
 
 // What a group message that names no one is: a question on how the work
-// goes, a new function to build, or anything else, for which the Coordinador
-// consults the agents picked.
-type Kind = 'estado' | 'funcion' | 'otro'
+// goes, work for the team to do (a new function among it), or anything
+// else, for which the Coordinador consults the agents picked.
+type Kind = 'estado' | 'encargo' | 'otro'
 
 const kindOf = (text: string): Kind => {
-  const said = /TIPO:\s*(estado|funci[oó]n|otro)/i.exec(text)?.[1]?.toLowerCase()
-  return said === 'estado' ? 'estado' : said?.startsWith('funci') ? 'funcion' : 'otro'
+  const said = /TIPO:\s*(estado|encargo|funci[oó]n|otro)/i.exec(text)?.[1]?.toLowerCase()
+  return said === 'estado' ? 'estado' : said === 'encargo' || said?.startsWith('funci') ? 'encargo' : 'otro'
 }
 
 // What the message is, and whom the Coordinador consults. A clear "no one"
@@ -564,7 +576,8 @@ const kindOf = (text: string): Kind => {
 //
 // Only the session's team is picked from. A specialty the message needs and
 // the team lacks comes back as missing, for the Coordinador to propose; with
-// no one to consult, the Coordinador answers alone.
+// no one to consult, the Coordinador answers alone. For work, the turns are
+// who should do it, with no fallback: none leaves the choice to the flow.
 type Pick = { kind: Kind; turns: Turn[]; missing: string[]; isAlone?: true }
 
 const pick = async ($: EngineInterface, history: ChatMessage[], text: string, crew: SessionTeam): Promise<Pick> => {
@@ -583,14 +596,15 @@ const pick = async ($: EngineInterface, history: ChatMessage[], text: string, cr
     titled('Chat hasta ahora (fíjate en lo que sigue pendiente: preguntas sin contestar, decisiones a medias):', history, PICK_CHARS),
     `Mensaje nuevo del usuario:\n\n${text}`,
     [
-      'Primero, qué es el mensaje: «TIPO: estado» si pregunta cómo va un trabajo, qué falta o si algo está hecho; «TIPO: funcion» si pide construir, añadir o cambiar una funcionalidad del producto; «TIPO: otro» para todo lo demás (preguntas, opiniones, decisiones, saludos).',
-      'Después, solo para TIPO: otro, a quién consultar:',
+      'Primero, qué es el mensaje: «TIPO: estado» si pregunta cómo va un trabajo, qué falta o si algo está hecho; «TIPO: encargo» si pide al equipo que haga un trabajo que hay que ejecutar (investigar, construir, añadir o cambiar una funcionalidad, revisar código, probar, desplegar, redactar un entregable); «TIPO: otro» para todo lo demás (preguntas, opiniones, decisiones, saludos).',
+      'Para TIPO: encargo, si el trabajo es claramente de uno o dos agentes (una investigación, una revisión, unas pruebas), una línea por agente que debe hacerlo, así: @alias: la tarea. Si es una funcionalidad nueva que pasa por el flujo completo, ninguna línea.',
+      'Para TIPO: otro, a quién consultar:',
       '- Lo normal es un solo agente. Elige un segundo solo si aporta algo distinto que el primero no puede dar: otra parte de la respuesta, otra evidencia, otro riesgo. Que dos roles tengan que ver con el tema no significa que deban contestar los dos.',
       '- Si el usuario comunica una decisión o confirma algo, elige uno solo: el que tiene que actuar o el que tiene algo que añadir. Nunca una ronda de confirmaciones.',
       '- Una pregunta del usuario siempre necesita a alguien que la conteste o pida la aclaración que falte.',
       `- Si el mensaje no pide nada (un gracias, un vale) o el usuario cierra la conversación, responde solo ${NOBODY}, aunque quede algo pendiente: se retoma cuando vuelva.`,
       '- Lo que pides a cada uno es una aportación de chat, no una tarea ni un entregable: dilo en pocas palabras. Ante una decisión, pide reconocerla y, si lo hay, el siguiente paso o un riesgo; nunca que rehaga requisitos, planes o documentos.',
-      `Responde solo con la línea TIPO y, si es otro, una línea por agente, ${PICKED} como mucho y el más necesario primero, así: @alias: lo concreto que debe aportar. O, en lugar de los agentes, ${NOBODY}.`,
+      `Responde solo con la línea TIPO y, si es otro, una línea por agente, ${PICKED} como mucho y el más necesario primero, así: @alias: lo concreto que debe aportar. O, en lugar de los agentes, ${NOBODY}. Si es encargo, las líneas de quien lo hace, o ninguna.`,
     ].join('\n'),
   ]
     .filter(Boolean)
@@ -608,7 +622,7 @@ const pick = async ($: EngineInterface, history: ChatMessage[], text: string, cr
     .slice(0, PICKED)
     .map((turn, at) => ({ ...turn, mustAnswer: at === 0 }))
   const missing =
-    kind === 'otro' ? ordered([...turnsOf(outside), ...named].map(turn => turn.role).filter(role => isOut(crew, role))) : []
+    kind === 'estado' ? [] : ordered([...turnsOf(outside), ...named].map(turn => turn.role).filter(role => isOut(crew, role)))
   if (kind !== 'otro' || turns.length > 0 || missing.length > 0) return { kind, turns, missing }
   const isNobody = said.replace(/[\s.*_]/g, '').toUpperCase() === NOBODY
   if (isNobody && !isQuestion(text)) return { kind, turns: [], missing }
@@ -676,6 +690,9 @@ const catchUpOf = (role: string, list: AgentRun[]) => {
 // of the person's can travel from agent to agent, and RELAYS how many
 // answers between agents it can start in all.
 const TO_GROUP = /^[\s*_]*al grupo[\s*_]*:[\s*_]*/i
+// Work asked in a chat leaves it on a line of its own, which the panel hands
+// to the Coordinador: the chats have no tools, the main session does.
+const TO_WORK = /^[\s*_]*encargo[\s*_]*:[\s*_]*/i
 const HOPS = 2
 const RELAYS = 3
 
@@ -692,8 +709,12 @@ const VOICE = [
 const TRUTH = [
   'Qué puedes afirmar:',
   '- En este chat no tienes herramientas: no lees ni cambias archivos y no ejecutas nada. Nunca digas que estás editando, probando, revisando el código o incorporando cambios, ni que lo vas a hacer ahora.',
-  '- Distingue lo que recomiendas, lo que ya está hecho (solo si aparece en tu trabajo de esta sesión o en la conversación) y lo que falta ejecutar. Si te piden ejecutar algo, o alguien podría creer que ya está hecho, dilo y sugiere pedírselo a Claude en el chat principal; no lo añadas como coletilla a cada respuesta.',
+  '- Distingue lo que recomiendas, lo que ya está hecho (solo si aparece en tu trabajo de esta sesión o en la conversación) y lo que falta ejecutar.',
+  '- Los encargos se piden aquí mismo, en el panel: el Coordinador los lanza en la sesión y el resultado llega a este chat. Nunca le digas al usuario que vaya al chat principal ni que repita el encargo en otro sitio.',
 ].join('\n')
+
+// For whoever the person writes to directly: work to run goes on as an order.
+const WORK = `Si el usuario te encarga un trabajo que hay que ejecutar (investigar, buscar información, escribir o cambiar código, probar, revisar archivos, desplegar), no lo hagas ni lo simules en el chat: contesta en una frase que se lo pasas al Coordinador para que te lance de verdad, y añade al final una línea que empiece por «ENCARGO:» con la tarea completa y concreta, tal como debe hacerse. El panel te avisa aquí cuando empieces y cuando termines. Si solo pregunta, opina o decide, contesta sin esa línea.`
 
 type Prompt = {
   role: string
@@ -748,6 +769,7 @@ const chatPrompt = ({ role, channel, group, before, message, since, turn, canRea
       ? 'Aporta solo lo nuevo: una respuesta pendiente, una decisión, evidencia, un riesgo concreto, una pregunta necesaria o un avance verificado. Repetir o reformular lo que ya se dijo no cuenta. Ante una decisión del usuario, reconócela en una frase y añade solo lo que cambia o el siguiente paso; no rehagas entregables en el chat.'
       : '',
     TRUTH,
+    message.from === ME && !isConsulted ? WORK : '',
     reachAll,
     turn.aim ? `Lo que se espera de ti en este mensaje (una aportación de chat, no un entregable): ${turn.aim}.` : '',
     pass,
@@ -801,9 +823,9 @@ const send = async ($: EngineInterface, channel: string, text: string) => {
 }
 
 // The Coordinador's answer to a group message that names no one. Asking how
-// the work goes only reads what the panel and the session hold; a new
-// function is handed to the main session; anything else, it asks the agents
-// it needs and answers with what they bring, once.
+// the work goes only reads what the panel and the session hold; work is
+// handed to the main session, which runs it; anything else, it asks the
+// agents it needs and answers with what they bring, once.
 const coordinate = async ($: EngineInterface, channel: string, history: ChatMessage[], message: ChatMessage) => {
   const id = crypto.randomUUID()
   await update($, chat, all => [...all, { id, channel, from: COORD, text: '', isPending: true }])
@@ -811,13 +833,30 @@ const coordinate = async ($: EngineInterface, channel: string, history: ChatMess
   const team = await teamOf($)
   const picked = await pick($, history, message.text, team)
   const { kind, missing } = picked
-  const text =
-    kind === 'estado'
-      ? await report($, history, message, team)
-      : kind === 'funcion'
-        ? await handOff($, message.text, team)
-        : await gather($, history, message, picked, team)
-  if (missing.length > 0) await propose($, channel, missing)
+  const doers = picked.turns.map(turn => turn.role)
+  let handed: Handed | undefined
+  let text: string | null
+  if (kind === 'estado') {
+    text = await report($, history, message, team)
+  } else if (kind === 'encargo' && doers.length === 0 && missing.length > 0) {
+    // Only roles out of the team can do it: they are offered first, with the work.
+    text = `Esto le toca a ${names(missing)}, que no está en el equipo de esta sesión. Si ${missing.length === 1 ? 'lo incorporas' : 'los incorporas'}, se lo encargo.`
+    await propose($, channel, missing, undefined, message.text)
+  } else if (kind === 'encargo') {
+    handed = await handOff($, message.text, team, doers, channel)
+    text = handed.text
+  } else {
+    // The Coordinador may still find the message was work to run.
+    const said = await gather($, history, message, picked, team)
+    const work = said === null ? undefined : splitWork(said)
+    if (work?.task) {
+      handed = await handOff($, work.task, team, work.roles, channel)
+      text = [work.kept, handed.text].filter(Boolean).join('\n\n')
+    } else {
+      text = said
+    }
+  }
+  if (missing.length > 0 && !(kind === 'encargo' && doers.length === 0)) await propose($, channel, missing)
   await update($, chat, all =>
     all.flatMap(one => {
       if (one.id !== id) return [one]
@@ -828,6 +867,18 @@ const coordinate = async ($: EngineInterface, channel: string, history: ChatMess
     }),
   )
   await follow($, channel)
+  if (handed?.deliver) void handed.deliver()
+}
+
+// A reply's line of work, «ENCARGO: @alias the task», apart from the rest.
+const splitWork = (text: string) => {
+  const split = text.split('\n')
+  const cut = split.findIndex(line => TO_WORK.test(line))
+  if (cut < 0) return { kept: text, task: '', roles: [] as string[] }
+  const line = split.slice(cut).join('\n').replace(TO_WORK, '').trim()
+  const roles = ordered(wordsOf(line).flatMap(rolesFor))
+  const task = line.replace(/^(?:@[\p{L}/-]+[\s,:]*)+/u, '').trim() || line
+  return { kept: split.slice(0, cut).join('\n').trim(), task, roles }
 }
 
 const say = async ($: EngineInterface, role: string, prompt: string) => {
@@ -849,24 +900,48 @@ const STATE: Record<RunStatus, string> = {
   interrumpido: 'interrumpido antes de terminar',
 }
 
-// What the panel can vouch for: the last function asked from it, and the
-// agents that started since (or this session's, with none asked). An agent
-// still working is not asked how it goes, which would take it off its task:
-// what it last wrote is read instead.
+// Where a request stands, for the Coordinador and on its card. One kept
+// from before the panel followed requests has only whether it was sent.
+const statusOf = (asked: PanelRequest): RequestStatus => asked.status ?? (asked.isSent ? 'enviado' : 'recibido')
+
+const REQUEST_STATE: Record<RequestStatus, string> = {
+  recibido: 'recibido en el panel; aún no ha entrado en la sesión principal (puede estar ocupada con otra cosa)',
+  enviado: 'la sesión principal lo recibió; todavía no ha empezado ningún agente',
+  iniciado: 'ejecución iniciada: la sesión principal lanzó agentes para él',
+  terminado: 'terminado: la sesión principal dio el resultado',
+  'sin-agentes': 'la sesión principal contestó sin lanzar ningún agente',
+  detenido: 'la sesión principal se detuvo antes de dar el resultado',
+  'no-enviado': 'no se pudo enviar a la sesión principal: no ha empezado',
+}
+
+const REQUEST_CHIP: Record<RequestStatus, string> = {
+  recibido: 'recibido, esperando a la sesión',
+  enviado: 'enviado, sin agentes todavía',
+  iniciado: 'en curso',
+  terminado: 'terminado',
+  'sin-agentes': 'sin agentes',
+  detenido: 'detenido',
+  'no-enviado': 'no enviado',
+}
+
+// What the panel can vouch for: the last work asked from it, and the agents
+// launched for it (or this session's, with none asked). An agent still
+// working is not asked how it goes, which would take it off its task: what
+// it last wrote is read instead.
 const facts = async ($: EngineInterface) => {
   const list = await read($, runs)
   const asked = (await read($, requests)).at(-1)
-  const scope = asked ? list.filter(one => (one.startedAt ?? 0) >= asked.at) : list.slice(-12)
+  const scope = asked
+    ? list.filter(one => asked.runIds?.includes(one.id) || (asked.runIds === undefined && (one.startedAt ?? 0) >= asked.at))
+    : list.slice(-12)
   const lines: string[] = []
   if (asked) {
     lines.push(
-      `Última función pedida desde el panel: «${asked.goal}», hace ${duration(Date.now() - asked.at)}. ${
-        asked.isSent ? 'La orden llegó a la sesión principal.' : 'No consta que la orden se enviara en la sesión principal.'
-      }`,
+      `Último encargo desde el panel: «${asked.goal}», hace ${duration(Date.now() - asked.at)}. Estado: ${REQUEST_STATE[statusOf(asked)]}.`,
     )
   }
   if (scope.length === 0) {
-    lines.push(asked ? 'Desde entonces no ha empezado ningún agente.' : 'El panel no tiene registrado ningún agente en esta sesión.')
+    lines.push(asked ? 'Para él no ha empezado ningún agente.' : 'El panel no tiene registrado ningún agente en esta sesión.')
   }
   for (const run of scope) {
     const took = run.durationMs !== undefined ? ` (${duration(run.durationMs)})` : ''
@@ -922,30 +997,104 @@ const report = async ($: EngineInterface, history: ChatMessage[], message: ChatM
   return say($, COORD, prompt)
 }
 
-// A new function goes to the main session, which runs the flow with the
-// coordinador skill and launches each agent for real. The panel leaves the
-// order in the prompt box: the person's own Enter sends it, so it runs as
-// their request, with the permissions they already have.
+// Work goes to the main session, which launches each agent for real with
+// its own permissions: the panel submits the order as a prompt of its own,
+// which runs once the session is idle, and follows it from there. The
+// person is told it was received; that it started, only once an agent did.
 //
-// With a team chosen, the order names it: the flow runs with those agents
+// With a team chosen, the order names it: the work runs with those agents
 // only, and a specialty missing is proposed to the person, not launched.
-const handOff = async ($: EngineInterface, goal: string, team: SessionTeam) => {
+type Handed = { text: string; deliver?: () => Promise<void> }
+
+const handOff = async ($: EngineInterface, goal: string, team: SessionTeam, roles: string[], channel: string): Promise<Handed> => {
   if (team.isChosen && team.roles.length === 0) {
-    return 'No hay ningún agente en el equipo de esta sesión, así que nadie puede trabajar en esto. Configura el equipo desde el panel y vuelve a pedírmelo.'
+    return { text: 'No hay ningún agente en el equipo de esta sesión, así que nadie puede trabajar en esto. Configura el equipo desde el panel y vuelve a pedírmelo.' }
   }
-  await update($, requests, list => [...list, { id: crypto.randomUUID(), goal, at: Date.now() }].slice(-10))
+  const doers = ordered(roles.filter(role => !isOut(team, role)))
+  const id = crypto.randomUUID().replace(/-/g, '').slice(0, 8)
+  const request: PanelRequest = { id, goal, at: Date.now(), status: 'recibido', channel, roles: doers, runIds: [], turnIds: [] }
+  await update($, requests, list => [...list, request].slice(-10))
+  const who =
+    doers.length > 0
+      ? `${doers.length === 1 ? 'Agente' : 'Agentes'}: ${doers.map(role => `${labelOf(role)} (${PREFIX}${role})`).join(', ')}. ${doers.length === 1 ? 'Lánzalo' : 'Lánzalos'} ahora con la herramienta Agent, con la tarea completa.`
+      : `No nombra agente: elige tú a quién lanzar y, si es una funcionalidad nueva, sigue el recorrido «Nueva función» de la skill ${SKILL}.`
   const crew = team.isChosen
-    ? ` Equipo activo de esta sesión: ${names(team.roles)}. Usa solo esos agentes; si hace falta otra especialidad, propónmela sin lanzarla.`
+    ? `Equipo activo de esta sesión: ${names(team.roles)}. Usa solo esos agentes; si hace falta otra especialidad, propónla sin lanzarla.`
     : ''
-  const order = `${SKILL} ${FROM_PANEL}: «${goal}».${crew} Sigue el recorrido «Nueva función» de la skill.`
-  const filled = await $.prompt.fill({ text: order }).catch(() => ({ isFilled: false }))
-  const start = team.isChosen
-    ? `empiezo con el equipo de esta sesión (${names(team.roles)}), en el orden del flujo`
-    : 'empiezo con Product Owner, análisis de negocio y QA, según haga falta, para tener historias, requisitos y criterios de aceptación. Después pasa a desarrollo y a pruebas'
-  return filled.isFilled
-    ? `Lo llevo al flujo del equipo. Te dejé la orden en la caja del chat principal: envíala con Enter y ${start}. Verás a cada agente en su tarjeta, y aquí puedes preguntarme «¿cómo va?».`
-    : `Lo llevo al flujo del equipo, pero no pude dejar la orden en la caja del chat principal. Envíala tú allí:\n\n\`\`\`\n${order}\n\`\`\``
+  const order = [
+    `${FROM_PANEL} (encargo ${id}). Lo escribió en el panel y espera allí el resultado:`,
+    `«${goal}»`,
+    who,
+    crew,
+    'Ejecútalo ya, sin pedirle que lo repita ni que cambie de chat. Al terminar, da un resumen corto del resultado: el panel se lo muestra.',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+  const start =
+    doers.length > 0
+      ? `Se lo encargo a ${names(doers)}`
+      : team.isChosen
+        ? `Lo llevo al flujo con el equipo de esta sesión (${names(team.roles)})`
+        : 'Lo llevo al flujo del equipo'
+  return {
+    text: `Recibido. ${start}. Te aviso aquí cuando empiece de verdad, y aquí te traigo el resultado.`,
+    deliver: () => deliver($, id, order),
+  }
 }
+
+const deliver = async ($: EngineInterface, id: string, order: string) => {
+  const isSent = await $.prompt.submit({ text: order }).then(
+    () => true,
+    () => false,
+  )
+  if (isSent) {
+    // Where the panel's own prompt.submit hook did not see it enter.
+    const now = (await read($, requests)).find(one => one.id === id)
+    if (now !== undefined && statusOf(now) === 'recibido') {
+      await setRequest($, id, one => ({ ...one, isSent: true as const, status: 'enviado' }))
+      await update($, driving, () => id)
+    }
+    return
+  }
+  await setRequest($, id, one => ({ ...one, status: 'no-enviado' }))
+  const channel = (await read($, requests)).find(one => one.id === id)?.channel ?? GROUP
+  const filled = await $.prompt.fill({ text: order }).catch(() => ({ isFilled: false }))
+  await post(
+    $,
+    channel,
+    COORD,
+    filled.isFilled
+      ? 'No pude enviar el encargo a la sesión principal, así que no ha empezado. Te dejé la orden en la caja del chat principal: envíala con Enter.'
+      : `No pude enviar el encargo a la sesión principal, así que no ha empezado. Envíalo allí:\n\n\`\`\`\n${order}\n\`\`\``,
+  )
+}
+
+// Work asked in a chat other than through the Coordinador's own answer.
+const commission = async ($: EngineInterface, channel: string, goal: string, roles: string[]) => {
+  const handed = await handOff($, goal, await teamOf($), roles, channel)
+  await post($, channel, COORD, handed.text)
+  if (handed.deliver) void handed.deliver()
+}
+
+const setRequest = ($: EngineInterface, id: string, change: (one: PanelRequest) => PanelRequest) =>
+  update($, requests, list => list.map(one => (one.id === id ? change(one) : one)))
+
+const post = async ($: EngineInterface, channel: string, from: string, text: string) => {
+  await update($, chat, all => [...all, { id: crypto.randomUUID(), channel, from, text }])
+  await follow($, channel)
+}
+
+// The request the main session is on, while it is.
+const drivingOf = async ($: EngineInterface) => {
+  const id = await read($, driving)
+  return id === null ? undefined : (await read($, requests)).find(one => one.id === id)
+}
+
+// A long report is shown in part: the whole one is under Entregas recientes.
+const REPORT_CHARS = 1500
+
+const excerpt = (text: string) =>
+  text.length <= REPORT_CHARS ? text : `${summaryOf(text)}\n\n_El informe completo está en Entregas recientes._`
 
 // Anything else: the agents picked answer the Coordinador in turn, each
 // seeing what the one before said, and it answers the person once.
@@ -997,6 +1146,7 @@ const gather = async (
       'Cómo respondes:',
       '- Reúne las aportaciones en una respuesta clara y natural, más corta que lo que te dieron: quédate con lo esencial, sin repetir ideas ni añadir lo que no dijeron, y ofrece el detalle si lo quiere. Nombra a un rol solo cuando ayude, por ejemplo para atribuir un riesgo o una decisión.',
       '- Si nadie aportó, contesta tú con lo que sabes, o pide la aclaración que falte.',
+      '- Si en realidad el usuario encarga un trabajo que hay que ejecutar, no lo contestes ni lo simules: di en una frase a quién se lo encargas y añade al final una línea «ENCARGO: @alias la tarea completa» (sin @alias si es una funcionalidad para todo el flujo). El panel la lanza en la sesión.',
     ].join('\n'),
     VOICE,
     TRUTH,
@@ -1055,9 +1205,9 @@ const answer = async (
 
   const list = await read($, runs)
   const team = await teamOf($)
-  const work = workOf(role, list)
+  const done = workOf(role, list)
   const catchUp = team.joined[role] !== undefined ? catchUpOf(role, list) : undefined
-  const prompt = chatPrompt({ role, channel, group, before, message, since, turn, canReach, work, members: team.roles, catchUp })
+  const prompt = chatPrompt({ role, channel, group, before, message, since, turn, canReach, work: done, members: team.roles, catchUp })
   const reply = await answerAs($, role, prompt).catch((error: unknown) => ({
     isAnswered: false as const,
     reason: String(error),
@@ -1065,12 +1215,18 @@ const answer = async (
   const text = reply.isAnswered ? reply.text.trim() : ''
   const passes = isPass(text) && !turn.mustAnswer
 
+  // Work asked of it leaves the reply as an order, for the Coordinador.
+  const work = message.from === ME && !passes ? splitWork(text) : { kept: text, task: '', roles: [] as string[] }
   // In its own chat, the line for the group leaves the reply.
-  const split = text.split('\n')
+  const split = work.kept.split('\n')
   const cut = channel === GROUP || !canReach ? -1 : split.findIndex(line => TO_GROUP.test(line))
   const toGroup = cut < 0 ? '' : split.slice(cut).join('\n').replace(TO_GROUP, '').trim()
-  const kept = cut < 0 ? text : split.slice(0, cut).join('\n').trim()
-  const shown = toGroup === '' ? kept : `${kept}\n\n_Le escribí al chat de grupo: «${toGroup}»_`.trim()
+  const kept = cut < 0 ? work.kept : split.slice(0, cut).join('\n').trim()
+  const notes = [
+    toGroup === '' ? '' : `_Le escribí al chat de grupo: «${toGroup}»_`,
+    work.task === '' ? '' : `_Se lo pasé al Coordinador como encargo: «${work.task}»_`,
+  ]
+  const shown = [kept, ...notes].filter(Boolean).join('\n\n')
 
   await update($, chat, all =>
     all.flatMap(one => {
@@ -1081,6 +1237,7 @@ const answer = async (
     }),
   )
   await follow($, channel)
+  if (work.task !== '' && reply.isAnswered) await commission($, channel, work.task, work.roles.length > 0 ? work.roles : [role])
   if (!canReach || passes || !reply.isAnswered) return
 
   if (toGroup !== '') {
@@ -1089,7 +1246,7 @@ const answer = async (
     await relay($, posted, hop, budget)
     return
   }
-  if (channel === GROUP) await relay($, { id, channel, from: role, text }, hop, budget)
+  if (channel === GROUP) await relay($, { id, channel, from: role, text: work.kept }, hop, budget)
 }
 
 // What an agent says to others in the group reaches those in the team; one
@@ -1102,6 +1259,30 @@ const relay = async ($: EngineInterface, posted: ChatMessage, hop: number, budge
   if (targets.length > 0) await ask($, GROUP, targets, posted, hop + 1, budget)
 }
 
+// A main-session turn of a request ending. While its agents work it waits:
+// they hand back, and the turn after brings the result. With all of them
+// done, or none launched, the answer goes to the panel and the request ends.
+const settle = async ($: EngineInterface, turnId: string, reason: string, answer: string) => {
+  const asked = (await read($, requests)).find(one => one.turnIds?.includes(turnId))
+  if (asked === undefined || ['terminado', 'sin-agentes', 'detenido'].includes(statusOf(asked))) return
+  const list = await read($, runs)
+  const mine = list.filter(one => asked.runIds?.includes(one.id))
+  if (mine.some(one => one.status === 'trabajando')) return
+  const said = answer.trim()
+  const status: RequestStatus = reason !== 'answer' ? 'detenido' : mine.length === 0 ? 'sin-agentes' : 'terminado'
+  const text =
+    status === 'detenido'
+      ? 'La sesión principal se detuvo antes de terminar el encargo.'
+      : status === 'sin-agentes'
+        ? `La sesión principal contestó sin lanzar a ningún agente:\n\n${excerpt(said || '_Sin respuesta._')}`
+        : said === ''
+          ? 'Encargo terminado.'
+          : excerpt(said)
+  await setRequest($, asked.id, one => ({ ...one, status }))
+  await update($, driving, now => (now === asked.id ? null : now))
+  await post($, asked.channel ?? GROUP, COORD, text)
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const kept = await readModels($)
@@ -1110,7 +1291,7 @@ export const register: Register = on => {
     await update($, effortsShown, () => keptEfforts)
     await $.command.register({
       name: 'panel-agentes',
-      description: 'Abre el panel de agentes del Agent Control Center',
+      description: 'Abre el panel de agentes del Agent Control Center; con un mensaje, lo escribe en su chat de grupo',
     })
     const usage = await $.session.usage().catch(() => undefined)
     if (usage !== undefined) await record($, usage.rateLimits, true)
@@ -1119,17 +1300,28 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('command.run', { command: 'panel-agentes' }, async $ => {
+  // With a message, it goes to the group chat as if typed there. It is sent
+  // once the command is over: a command holds the session, and work it hands
+  // on could not start until it ended.
+  on('command.run', { command: 'panel-agentes' }, async ($, e) => {
     keepTicking($)
     await $.ui.open({ id: PANE, title: TITLE })
+    const said = e.args.trim()
+    if (said === '') return { text: 'Panel de agentes abierto.' }
+    await update($, view, () => GROUP)
+    $.clock.after(1, () => {
+      void send($, GROUP, said)
+    })
 
-    return { text: 'Panel de agentes abierto.' }
+    return { text: 'Mensaje enviado al chat de grupo del panel de agentes.' }
   })
 
   on('agent.spawn', async ($, e, next) => {
     const role = roleOf(e.subagentType)
     const isMember = TEAM.some(one => one.role === role)
+    const asked = e.resume === undefined ? await drivingOf($) : undefined
     if (isMember && isPaused(await read($, paused), role)) {
+      if (asked) await post($, asked.channel ?? GROUP, COORD, `${labelOf(role)} no pudo empezar: está en pausa.`)
       return {
         deny: `El usuario puso en pausa a ${labelOf(role)} desde el panel de agentes. No lo lances hasta que lo reanude; si hace falta, pregúntale.`,
       }
@@ -1138,6 +1330,7 @@ export const register: Register = on => {
     if (isMember && e.resume === undefined) {
       const team = await teamOf($)
       if (isOut(team, role)) {
+        if (asked) await post($, asked.channel ?? GROUP, COORD, `${labelOf(role)} no pudo empezar: no está en el equipo de esta sesión.`)
         return {
           deny: `${labelOf(role)} no está en el equipo de esta sesión, que el usuario eligió en el panel de agentes (${
             team.roles.length > 0 ? `equipo activo: ${names(team.roles)}` : 'ahora no hay ningún agente'
@@ -1176,6 +1369,11 @@ export const register: Register = on => {
       }
       await update($, runs, list => [...list, run].slice(-50))
       if (cutShort(await read($, runs), role).length === 0) await update($, notice, () => null)
+      // Work asked in the panel has started for real: the person hears it there.
+      if (asked) {
+        await setRequest($, asked.id, one => ({ ...one, status: 'iniciado', runIds: [...(one.runIds ?? []), id] }))
+        await post($, asked.channel ?? GROUP, COORD, `${labelOf(role)} ya está trabajando en «${e.description}».`)
+      }
     }
     void $.ui.open({ id: PANE, title: TITLE })
 
@@ -1197,13 +1395,18 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // The Coordinador's order, once the person sends it in the main session.
-  // The main session hears of the team when it changes, with the next prompt.
+  // The Coordinador's order entering the main session: from then on, the
+  // agents it launches and the turns it takes are that request's, until its
+  // result, or until the person writes something of their own there. An
+  // agent's hand-back keeps it going. The main session hears of the team
+  // when it changes, with the next prompt.
   on('prompt.submit', async ($, e, next) => {
-    if (e.text.includes(FROM_PANEL)) {
-      await update($, requests, list =>
-        list.map((one, at) => (at === list.length - 1 && e.text.includes(one.goal) ? { ...one, isSent: true as const } : one)),
-      )
+    const asked = e.text.includes(FROM_PANEL) ? REQUEST_ID.exec(e.text)?.[1] : undefined
+    if (asked !== undefined) {
+      await setRequest($, asked, one => ({ ...one, isSent: true as const, status: statusOf(one) === 'recibido' ? 'enviado' : one.status }))
+      await update($, driving, () => asked)
+    } else if (e.origin.kind === 'composer') {
+      await update($, driving, () => null)
     }
     const team = await teamOf($)
     const signature = `${team.roles.join(',')}|${team.leaving.join(',')}`
@@ -1241,9 +1444,20 @@ export const register: Register = on => {
     return yield* next(effort ? { ...e, effort } : e)
   })
 
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) {
+      const asked = await drivingOf($)
+      if (asked) await setRequest($, asked.id, one => ({ ...one, turnIds: [...(one.turnIds ?? []), e.turnId].slice(-20) }))
+    }
+
+    return next(e)
+  })
+
   on('turn.complete', async ($, e, next) => {
     const agentId = e.agentId
-    if (agentId !== undefined) {
+    if (agentId === undefined) {
+      await settle($, e.turnId, e.reason, e.answer)
+    } else {
       const status: RunStatus =
         e.reason === 'answer' ? 'entregado' : e.reason === 'aborted' ? 'interrumpido' : 'fallo'
       await update($, runs, list =>
@@ -1264,6 +1478,18 @@ export const register: Register = on => {
       if (role !== undefined && team.leaving.includes(role) && !isBusy(await read($, runs), role)) {
         await setTeam($, now => ({ ...now, leaving: now.leaving.filter(one => one !== role) }))
         await noteGroup($, `${labelOf(role)} terminó su tarea y salió del equipo.`)
+      }
+      // An agent of a request delivers in the chat it was asked in.
+      const run = (await read($, runs)).find(one => one.id === agentId)
+      const asked = (await read($, requests)).find(one => one.runIds?.includes(agentId))
+      if (run !== undefined && asked !== undefined) {
+        const said =
+          run.status === 'entregado'
+            ? `Terminé «${run.task}».${e.answer.trim() ? `\n\n${excerpt(e.answer.trim())}` : ''}`
+            : run.status === 'interrumpido'
+              ? `Me pararon antes de terminar «${run.task}».`
+              : `No pude terminar «${run.task}»: falló antes de entregar.`
+        await post($, asked.channel ?? GROUP, run.role, said)
       }
     }
 
@@ -1458,7 +1684,12 @@ export const register: Register = on => {
               <Text>
                 {names(offered.roles)} no {offered.roles.length === 1 ? 'está' : 'están'} en el equipo de esta sesión. ¿
                 {offered.roles.length === 1 ? 'Lo' : 'Los'} incorporo
-                {offered.messageId ? ` y ${offered.roles.length === 1 ? 'le' : 'les'} paso el mensaje` : ''}?
+                {offered.task !== undefined
+                  ? ` y ${offered.roles.length === 1 ? 'le' : 'les'} paso el encargo`
+                  : offered.messageId
+                    ? ` y ${offered.roles.length === 1 ? 'le' : 'les'} paso el mensaje`
+                    : ''}
+                ?
               </Text>
               <Box flexDirection="row" flexWrap="wrap" gap={2}>
                 <Button key="incorporar" variant="primary" onPress={() => accept($)}>
@@ -1756,7 +1987,7 @@ export const register: Register = on => {
       )
     })
 
-    // The Coordinador: the main session, and the last function handed to it.
+    // The Coordinador: the main session, and the last work handed to it.
     const asked = (await read($, requests)).at(-1)
     const coordinator = (
       <Box
@@ -1780,7 +2011,7 @@ export const register: Register = on => {
         <Box paddingLeft={5}>
           <Text dimColor size="caption" wrap="truncate-end">
             {asked
-              ? `Última función: «${asked.goal}»${asked.isSent ? '' : ' · orden aún no enviada'}`
+              ? `Último encargo: «${asked.goal}» · ${REQUEST_CHIP[statusOf(asked)]}`
               : 'Recibe los mensajes del grupo que no nombran a nadie.'}
           </Text>
         </Box>

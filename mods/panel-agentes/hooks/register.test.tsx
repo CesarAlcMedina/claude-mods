@@ -356,22 +356,30 @@ test('el Coordinador consulta solo a quien hace falta y contesta una vez', async
   await ui.unmount()
 })
 
-test('el Coordinador informa del avance sin lanzar nada y pasa las funciones nuevas a la sesión principal', async ($, on) => {
+test('el Coordinador informa del avance sin lanzar nada y lanza los encargos en la sesión, del recibido al resultado', async ($, on) => {
   const prompts: string[] = []
   const fills: string[] = []
+  const submits: string[] = []
   const usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
   let picked = 'TIPO: estado'
-  let canFill = true
+  let canSubmit = true
   let count = 0
   mock.store(on)
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('agent.spawn', () => ({ model: 'test', agentId: `a${++count}` }))
   on('tool.call', () => ({ result: {} }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
-  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('prompt.submit', (_, e) => {
+    if (e.origin.kind === 'plugin') {
+      if (!canSubmit) throw new Error('sin sesión')
+      submits.push(e.text)
+    }
+    return { text: e.text }
+  })
   on('prompt.fill', (_, e) => {
     fills.push(e.text)
-    return { isFilled: canFill }
+    return { isFilled: true }
   })
   // What a working agent last wrote, read from its own conversation.
   on('session.messages', () => ({
@@ -390,11 +398,16 @@ test('el Coordinador informa del avance sin lanzar nada y pasa las funciones nue
       subagentType: `agent-control-center:${role}`,
       provider: PROVIDER,
       parentModel: 'test',
-      background: false,
+      background: true,
       fork: false,
     })
   const finish = (agentId: string, answer: string) =>
     $.turn.complete({ answer, durationMs: 60000, isAborted: false, turnId: 'u', agentId, reason: 'answer' })
+  // A turn of the main session, and its end.
+  const mainTurn = async (turnId: string, answer: string) => {
+    await $.turn.start({ text: '', turnId })
+    return () => $.turn.complete({ answer, durationMs: 1000, isAborted: false, turnId, reason: 'answer' })
+  }
 
   await spawn('product-owner', 'Historias del login')
   await finish('a1', 'Tres historias listas para el login.')
@@ -402,6 +415,11 @@ test('el Coordinador informa del avance sin lanzar nada y pasa las funciones nue
 
   // Asking how it goes reads what the panel and the agent hold, and starts nothing.
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const shows = async (pattern: RegExp) => (await ui.find({ type: 'Markdown', text: pattern })) !== undefined
+  // What the panel does once the order is on its way runs on its own.
+  const until = async (done: () => boolean | Promise<boolean>) => {
+    for (let i = 0; i < 200 && !(await done()); i++) await ui.find({ key: 'caja' })
+  }
   await ui.press({ key: 'chat-coordinador' })
   await ui.input({ key: 'entrada-grupo-0', text: '¿Cómo va el login?' })
   expect(prompts.length).toBe(1)
@@ -413,45 +431,152 @@ test('el Coordinador informa del avance sin lanzar nada y pasa las funciones nue
   expect(prompts[0]).toContain('Lo último que escribió: «Llevo el endpoint de callback; falta la sesión.»')
   expect(prompts[0]).toContain('No consta ninguna entrega de QA posterior al desarrollo: nada está verificado.')
   expect(prompts[0]).toContain('verificado (QA lo probó después del desarrollo')
-  expect(await ui.find({ type: 'Markdown', text: /Informe 1/ })).toBeDefined()
-  expect(fills).toEqual([])
+  expect(await shows(/Informe 1/)).toBe(true)
+  expect(submits).toEqual([])
   expect(count).toBe(2)
 
-  // A new function: the order waits in the main prompt box for the person's Enter.
-  picked = 'TIPO: funcion'
-  await ui.input({ key: 'entrada-grupo-1', text: 'Quiero exportar las reservas a PDF' })
-  expect(fills.length).toBe(1)
-  expect(fills[0]).toStartWith('/agent-control-center:coordinador Nueva función pedida desde el panel de agentes: «Quiero exportar las reservas a PDF».')
+  // Work for one agent: received, and submitted to the main session by the
+  // panel itself, with no trip to the main chat and no Enter.
+  picked = 'TIPO: encargo\n@research: investigar las dos empresas'
+  await ui.input({ key: 'entrada-grupo-1', text: 'Investiga estas empresas: Acme y Globex' })
+  expect(await shows(/^Recibido\. Se lo encargo a Investigación\. Te aviso aquí cuando empiece de verdad/)).toBe(true)
+  await until(() => submits.length === 1)
+  expect(submits[0]).toContain('Encargo del usuario desde el panel de agentes (encargo ')
+  expect(submits[0]).toContain('«Investiga estas empresas: Acme y Globex»')
+  expect(submits[0]).toContain('Agente: Investigación (agent-control-center:research-agent). Lánzalo ahora')
+  expect(submits[0]).toContain('sin pedirle que lo repita ni que cambie de chat')
+  expect(fills).toEqual([])
   expect(prompts.length).toBe(1)
-  expect(await ui.find({ type: 'Markdown', text: /envíala con Enter/ })).toBeDefined()
-  await ui.press({ key: 'volver-abajo' })
-  expect(await ui.find({ type: 'Text', text: /orden aún no enviada/ })).toBeDefined()
 
-  // Sent, the flow runs in the main session: development, then QA.
-  // The person sends it with their own Enter.
-  await $.prompt.submit({ text: fills[0] ?? '', wait: false, origin: { kind: 'composer' } })
-  expect(await ui.find({ type: 'Text', text: /orden aún no enviada/ })).toBeUndefined()
-  await spawn('backend-engineer', 'Exportar a PDF')
-  await finish('a3', 'Endpoint de exportación hecho, con pruebas unitarias.')
-  await spawn('qa-engineer', 'Probar la exportación')
-  await finish('a4', 'Las 6 pruebas de exportación pasan.')
+  // Received is not started: no agent yet, and the Coordinador says so.
+  await ui.press({ key: 'volver-abajo' })
+  expect(await ui.find({ type: 'Text', text: /Último encargo: «Investiga estas empresas: Acme y Globex» · enviado, sin agentes todavía/ })).toBeDefined()
   await ui.press({ key: 'chat-coordinador' })
   picked = 'TIPO: estado'
-  await ui.input({ key: 'entrada-grupo-2', text: '¿Cómo va esta tarea?' })
-  expect(prompts.length).toBe(2)
-  expect(prompts[1]).toContain('Última función pedida desde el panel: «Quiero exportar las reservas a PDF»')
-  expect(prompts[1]).toContain('La orden llegó a la sesión principal.')
-  expect(prompts[1]).toContain('Backend, tarea «Exportar a PDF»: terminado')
-  expect(prompts[1]).toContain('QA entregó después del desarrollo')
-  // Only what started since the request counts for it.
+  await ui.input({ key: 'entrada-grupo-2', text: '¿Ya empezó?' })
+  expect(prompts[1]).toContain('Estado: la sesión principal lo recibió; todavía no ha empezado ningún agente.')
+  expect(prompts[1]).toContain('Para él no ha empezado ningún agente.')
   expect(prompts[1]).not.toContain('Historias del login')
 
-  // Without a prompt box to take the order, the Coordinador shows it to send by hand.
-  canFill = false
-  picked = 'TIPO: funcion'
-  await ui.input({ key: 'entrada-grupo-3', text: 'Añade recordatorios por correo' })
-  expect(await ui.find({ type: 'Markdown', text: /Envíala tú allí/ })).toBeDefined()
-  expect(count).toBe(4)
+  // The main session launches the agent: now it has started, and says so.
+  const firstEnds = await mainTurn('m1', 'Lancé a Investigación en segundo plano.')
+  await spawn('research-agent', 'Investigar Acme y Globex')
+  expect(await shows(/^Investigación ya está trabajando en «Investigar Acme y Globex»\.$/)).toBe(true)
+  // Its turn ends while the agent works: nothing to give yet.
+  await firstEnds()
+  expect(await shows(/Lancé a Investigación/)).toBe(false)
+  picked = 'TIPO: estado'
+  await ui.input({ key: 'entrada-grupo-3', text: '¿Cómo va?' })
+  expect(prompts[2]).toContain('Estado: ejecución iniciada')
+  expect(prompts[2]).toContain('- Investigación, tarea «Investigar Acme y Globex»: iniciado')
+
+  // The agent delivers in the chat it was asked in, and the main session's
+  // next turn, on its hand-back, brings the result.
+  await finish('a3', 'Acme fabrica cohetes; Globex vende software.')
+  expect(await shows(/^Terminé «Investigar Acme y Globex»\.\n\nAcme fabrica cohetes; Globex vende software\.$/)).toBe(true)
+  await $.prompt.submit({ text: '<agent-message from="a3">…</agent-message>', wait: false, origin: { kind: 'peer' } })
+  const lastEnds = await mainTurn('m2', 'Acme fabrica cohetes y Globex vende software.')
+  await lastEnds()
+  expect(await shows(/^Acme fabrica cohetes y Globex vende software\.$/)).toBe(true)
+  await ui.press({ key: 'volver-abajo' })
+  expect(await ui.find({ type: 'Text', text: /· terminado$/ })).toBeDefined()
+
+  // A main session that answers without launching anyone says so.
+  await ui.press({ key: 'chat-coordinador' })
+  picked = 'TIPO: encargo'
+  await ui.input({ key: 'entrada-grupo-4', text: 'Quiero exportar las reservas a PDF' })
+  expect(await shows(/^Recibido\. Lo llevo al flujo del equipo\./)).toBe(true)
+  await until(() => submits.length === 2)
+  expect(submits[1]).toContain('No nombra agente: elige tú a quién lanzar y, si es una funcionalidad nueva, sigue el recorrido «Nueva función» de la skill agent-control-center:coordinador.')
+  const alone = await mainTurn('m3', 'Necesito saber en qué formato.')
+  await alone()
+  expect(await shows(/^La sesión principal contestó sin lanzar a ningún agente:\n\nNecesito saber en qué formato\.$/)).toBe(true)
+
+  // Something the person types in the main chat is theirs, not the panel's.
+  picked = 'TIPO: encargo\n@qa: probar la exportación'
+  await ui.input({ key: 'entrada-grupo-5', text: 'Prueba la exportación' })
+  await until(() => submits.length === 3)
+  await $.prompt.submit({ text: 'otra cosa', wait: false, origin: { kind: 'composer' } })
+  await spawn('devops-engineer', 'Algo mío')
+  expect(await shows(/DevOps ya está trabajando/)).toBe(false)
+
+  // With no session to take it, the panel says it did not start.
+  canSubmit = false
+  picked = 'TIPO: encargo\n@qa: probar'
+  await ui.input({ key: 'entrada-grupo-6', text: 'Añade recordatorios por correo' })
+  await until(() => shows(/No pude enviar el encargo a la sesión principal, así que no ha empezado/))
+  expect(await shows(/No pude enviar el encargo a la sesión principal, así que no ha empezado/)).toBe(true)
+  expect(fills.at(-1)).toContain('«Añade recordatorios por correo»')
+  await ui.unmount()
+})
+
+test('un encargo en el chat de un agente, o con @ en el grupo, llega al Coordinador y se lanza', async ($, on) => {
+  const prompts: string[] = []
+  const submits: string[] = []
+  const usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
+  let count = 0
+  mock.store(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('agent.spawn', () => ({ model: 'test', agentId: `a${++count}` }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('prompt.submit', (_, e) => {
+    if (e.origin.kind === 'plugin') submits.push(e.text)
+    return { text: e.text }
+  })
+  on('model.complete', () => ({ value: { isAnswered: true as const, text: 'TIPO: otro\n@po: opinar', usage } }))
+  on('model.fork', (_, e) => {
+    prompts.push(e.prompt)
+    const said = (text: string) => ({ value: { isAnswered: true as const, text, usage } })
+    if (e.prompt.includes('eres el Coordinador')) return said('Se lo encargo a Investigación.\nENCARGO: @research compara los precios de Acme y Globex')
+    if (e.prompt.includes('agente QA del')) return said('Se lo paso al Coordinador para que me lance.\nENCARGO: Prueba el login con tres usuarios')
+    if (e.prompt.includes('agente Investigación del')) return said('Vale, me pongo.\n**ENCARGO:** Investiga la librería pdfkit')
+    return said('Opinión del PO.')
+  })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const shows = async (pattern: RegExp) => (await ui.find({ type: 'Markdown', text: pattern })) !== undefined
+  const until = async (done: () => boolean) => {
+    for (let i = 0; i < 200 && !done(); i++) await ui.find({ key: 'caja' })
+  }
+
+  // In its own chat: QA hands the work on, and its line is not shown as is.
+  await ui.press({ key: 'chat-qa-engineer' })
+  await ui.input({ key: 'entrada-qa-engineer-0', text: 'Prueba el login' })
+  expect(prompts[0]).toContain('añade al final una línea que empiece por «ENCARGO:»')
+  expect(prompts[0]).toContain('Nunca le digas al usuario que vaya al chat principal')
+  expect(prompts[0]).not.toContain('chat principal;')
+  expect(await shows(/^Se lo paso al Coordinador para que me lance\.\n\n_Se lo pasé al Coordinador como encargo: «Prueba el login con tres usuarios»_$/)).toBe(true)
+  expect(await shows(/^Recibido\. Se lo encargo a QA\./)).toBe(true)
+  await until(() => submits.length === 1)
+  expect(submits[0]).toContain('«Prueba el login con tres usuarios»')
+  expect(submits[0]).toContain('Agente: QA (agent-control-center:qa-engineer)')
+  await $.prompt.submit({ text: submits[0] ?? '', wait: false, origin: { kind: 'plugin', name: 'panel-agentes' } })
+  await $.agent.spawn({
+    tool_use_id: 't',
+    prompt: 'Prueba',
+    description: 'Probar el login',
+    subagentType: 'agent-control-center:qa-engineer',
+    provider: PROVIDER,
+    parentModel: 'test',
+    background: false,
+    fork: false,
+  })
+  // It started, and hears so in its own chat.
+  expect(await shows(/^QA ya está trabajando en «Probar el login»\.$/)).toBe(true)
+
+  // Named with @ in the group, the same.
+  await ui.press({ key: 'volver-abajo' })
+  await ui.press({ key: 'chat-grupo' })
+  await ui.input({ key: 'entrada-grupo-0', text: '@research investiga pdfkit' })
+  expect(await shows(/_Se lo pasé al Coordinador como encargo: «Investiga la librería pdfkit»_/)).toBe(true)
+  await until(() => submits.length === 3)
+  expect(submits.at(-1)).toContain('Agente: Investigación (agent-control-center:research-agent)')
+
+  // Taken for a question, the Coordinador still sees work in it and hands it on.
+  await ui.input({ key: 'entrada-grupo-1', text: '¿Me miras los precios de Acme y Globex?' })
+  expect(await shows(/^Se lo encargo a Investigación\.\n\nRecibido\. Se lo encargo a Investigación\./)).toBe(true)
+  await until(() => submits.length === 4)
+  expect(submits.at(-1)).toContain('«compara los precios de Acme y Globex»')
   await ui.unmount()
 })
 
@@ -555,12 +680,19 @@ test('el esfuerzo elegido, y parar o pausar a los agentes', async ($, on) => {
 
 test('al reanudar, el trabajo que cortó la pausa sigue donde se quedó', async ($, on) => {
   const fills: string[] = []
+  const submits: string[] = []
+  let canSubmit = true
   let count = 0
   mock.store(on)
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('agent.spawn', (_, e) => ({ model: 'test', agentId: e.resume?.agentId ?? `a${++count}` }))
   on('tool.call', () => ({ result: {} }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('prompt.submit', (_, e) => {
+    if (!canSubmit) throw new Error('sin sesión')
+    submits.push(e.text)
+    return { text: e.text }
+  })
   on('prompt.fill', (_, e) => {
     fills.push(e.text)
     return { isFilled: true }
@@ -581,6 +713,9 @@ test('al reanudar, el trabajo que cortó la pausa sigue donde se quedó', async 
 
   await $.agent.spawn({ ...base, description: 'Validar bloque 2' })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const until = async (done: () => boolean) => {
+    for (let i = 0; i < 200 && !done(); i++) await ui.find({ key: 'tarjeta-coordinador' })
+  }
 
   // Paused, QA is told to stop and say where it left off.
   await ui.press({ key: 'pausa-todos' })
@@ -588,30 +723,40 @@ test('al reanudar, el trabajo que cortó la pausa sigue donde se quedó', async 
   await $.turn.complete({ answer: 'Validé los casos 1 a 4; faltan del 5 al 9.', durationMs: 1000, isAborted: false, turnId: 'u', agentId: 'a1', reason: 'answer' })
   expect(await ui.find({ type: 'Text', text: /El equipo está en pausa/ })).toBeDefined()
 
-  // Resumed, its work goes back to the main session to go on from there.
+  // Resumed, its work goes back to the main session to go on from there,
+  // sent by the panel itself.
   await ui.press({ key: 'pausa-todos' })
-  expect(fills.length).toBe(1)
-  expect(fills[0]).toContain('Reanuda el trabajo que quedó en pausa')
-  expect(fills[0]).toContain('QA (agente a1), tarea «Validar bloque 2». Dónde lo dejó: Validé los casos 1 a 4; faltan del 5 al 9.')
-  expect(await ui.find({ type: 'Markdown', text: /te dejé la orden en la caja del chat principal/ })).toBeDefined()
+  await until(() => submits.length === 1)
+  expect(submits[0]).toContain('Reanuda el trabajo que quedó en pausa')
+  expect(submits[0]).toContain('QA (agente a1), tarea «Validar bloque 2». Dónde lo dejó: Validé los casos 1 a 4; faltan del 5 al 9.')
+  expect(fills).toEqual([])
+  expect(await ui.find({ type: 'Markdown', text: /Reanudando: QA sigue donde lo dejó/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /Listo para seguir/ })).toBeDefined()
 
-  // Sent, the same agent goes on: its tools work again, and the notice goes.
+  // The same agent goes on: its tools work again, and the notice goes.
   await $.agent.spawn({ ...base, description: 'Validar bloque 2', resume: { agentId: 'a1' } })
   expect(await toolOf('a1')).toMatchObject({ result: {} })
-  expect(await ui.find({ type: 'Markdown', text: /te dejé la orden/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Markdown', text: /Reanudando/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /Listo para seguir/ })).toBeUndefined()
 
-  // A role paused on its own resumes the same way; with nothing cut short, no order.
+  // A role paused on its own resumes the same way; with no session to take
+  // the order, it waits in the prompt box instead.
+  canSubmit = false
   await ui.press({ key: 'menu-qa-engineer' })
   await ui.press({ key: 'pausa-qa-engineer' })
   await $.turn.complete({ answer: 'Casos 5 y 6 hechos.', durationMs: 1000, isAborted: false, turnId: 'u', agentId: 'a1', reason: 'answer' })
   await ui.press({ key: 'pausa-qa-engineer' })
-  expect(fills.length).toBe(2)
-  expect(fills[1]).toContain('Casos 5 y 6 hechos.')
+  await until(() => fills.length === 1)
+  expect(fills[0]).toContain('Casos 5 y 6 hechos.')
+  for (let i = 0; i < 200 && (await ui.find({ type: 'Markdown', text: /te dejé la orden en la caja/ })) === undefined; i++) {
+    // the fallback runs in its own dispatch
+  }
+  expect(await ui.find({ type: 'Markdown', text: /te dejé la orden en la caja del chat principal/ })).toBeDefined()
+  // With nothing cut short, no order.
   await ui.press({ key: 'pausa-qa-engineer' })
   await ui.press({ key: 'pausa-qa-engineer' })
-  expect(fills.length).toBe(2)
+  expect(fills.length).toBe(1)
+  expect(submits.length).toBe(1)
   await ui.unmount()
 })
 
@@ -754,7 +899,7 @@ test('configurar equipo: elegir, cancelar, quitar, incorporar, ocupados, vacío 
 test('solo el equipo participa en los chats, y a un agente fuera se le ofrece incorporarse antes de escribirle', async ($, on) => {
   const prompts: string[] = []
   const picks: string[] = []
-  const fills: string[] = []
+  const submits: string[] = []
   const usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
   let picked = ''
   let qaSays = 'Respuesta de QA.'
@@ -763,9 +908,9 @@ test('solo el equipo participa en los chats, y a un agente fuera se le ofrece in
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('agent.spawn', () => ({ model: 'test', agentId: `a${++count}` }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
-  on('prompt.fill', (_, e) => {
-    fills.push(e.text)
-    return { isFilled: true }
+  on('prompt.submit', (_, e) => {
+    if (e.origin.kind === 'plugin') submits.push(e.text)
+    return { text: e.text }
   })
   on('model.complete', (_, e) => {
     picks.push(e.prompt)
@@ -862,28 +1007,44 @@ test('solo el equipo participa en los chats, y a un agente fuera se le ofrece in
   await ui.press({ key: 'chat-grupo' })
   expect(await ui.find({ type: 'Text', text: /Revisión de código no está en el equipo/ })).toBeDefined()
 
+  const until = async (done: () => boolean) => {
+    for (let i = 0; i < 200 && !done(); i++) await ui.find({ key: 'caja' })
+  }
+
   // A new function goes to the main session with the team named.
   picked = 'TIPO: funcion'
   await ui.input({ key: 'entrada-grupo-5', text: 'Quiero exportar a PDF' })
-  expect(fills.at(-1)).toContain('Equipo activo de esta sesión: Product Owner, QA y DevOps. Usa solo esos agentes')
-  expect(await ui.find({ type: 'Markdown', text: /empiezo con el equipo de esta sesión \(Product Owner, QA y DevOps\)/ })).toBeDefined()
+  await until(() => submits.length === 1)
+  expect(submits.at(-1)).toContain('Equipo activo de esta sesión: Product Owner, QA y DevOps. Usa solo esos agentes')
+  expect(await ui.find({ type: 'Markdown', text: /Lo llevo al flujo con el equipo de esta sesión \(Product Owner, QA y DevOps\)/ })).toBeDefined()
+
+  // Work only one out of the team can do: offered first, then launched.
+  picked = 'TIPO: encargo\n@research: investigar librerías de PDF'
+  await ui.input({ key: 'entrada-grupo-6', text: 'Investiga librerías de PDF' })
+  expect(submits.length).toBe(1)
+  expect(await ui.find({ type: 'Markdown', text: /Esto le toca a Investigación, que no está en el equipo de esta sesión/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /¿Lo incorporo y le paso el encargo\?/ })).toBeDefined()
+  await ui.press({ key: 'incorporar' })
+  await until(() => submits.length === 2)
+  expect(submits.at(-1)).toContain('«Investiga librerías de PDF»')
+  expect(submits.at(-1)).toContain('Agente: Investigación (agent-control-center:research-agent)')
 
   // With no one in the team, the Coordinador answers alone and hands nothing on.
   await ui.press({ key: 'volver' })
   await ui.press({ key: 'configurar-equipo' })
-  for (const role of ['product-owner', 'qa-engineer', 'devops-engineer']) await ui.press({ key: `casilla-${role}` })
+  for (const role of ['product-owner', 'qa-engineer', 'devops-engineer', 'research-agent']) await ui.press({ key: `casilla-${role}` })
   await ui.press({ key: 'confirmar-equipo' })
   await ui.press({ key: 'chat-grupo' })
   const consulted = prompts.filter(one => one.includes('eres el agente')).length
   picked = 'NADIE'
-  await ui.input({ key: 'entrada-grupo-6', text: '¿Quién puede ayudarme?' })
+  await ui.input({ key: 'entrada-grupo-7', text: '¿Quién puede ayudarme?' })
   expect(prompts.filter(one => one.includes('eres el agente')).length).toBe(consulted)
   expect(coordinator()).toContain('no consultaste a ningún agente')
   expect(coordinator()).toContain('Configurar equipo')
   picked = 'TIPO: funcion'
-  const handed = fills.length
-  await ui.input({ key: 'entrada-grupo-7', text: 'Quiero exportar a Excel' })
-  expect(fills.length).toBe(handed)
+  const handed = submits.length
+  await ui.input({ key: 'entrada-grupo-8', text: 'Quiero exportar a Excel' })
+  expect(submits.length).toBe(handed)
   expect(await ui.find({ type: 'Markdown', text: /No hay ningún agente en el equipo de esta sesión/ })).toBeDefined()
   await ui.unmount()
 })
