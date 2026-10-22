@@ -1,13 +1,13 @@
 ---
 name: coordinador
-description: "Coordina los nueve subagentes del Agent Control Center (product-owner, business-analyst, ux-ui-designer, backend-engineer, frontend-engineer, code-reviewer, qa-engineer, devops-engineer, research-agent). Úsala cuando una tarea de software necesite varios de estos roles, cuando el usuario pida usar el Agent Control Center, el flujo de agentes o un agente por su rol, cuando pida una función nueva (también desde el panel de agentes) o pregunte cómo va una tarea del equipo."
+description: "Coordina los nueve subagentes del Agent Control Center (product-owner, business-analyst, ux-ui-designer, backend-engineer, frontend-engineer, code-reviewer, qa-engineer, devops-engineer, research-agent). Úsala cuando una tarea de software necesite varios de estos roles, cuando el usuario pida usar el Agent Control Center, el flujo de agentes o un agente por su rol, cuando pida una función nueva, cuando llegue un encargo del panel de agentes o cuando pregunte cómo va una tarea del equipo."
 ---
 
 # Agent Control Center
 
 La sesión principal actúa como **coordinador** de nueve subagentes del plugin agent-control-center. Los subagentes no pueden lanzar a otros, así que la coordinación es siempre tuya: cada etapa se hace lanzando de verdad al agente con la herramienta Agent, nunca con mensajes, simulaciones ni promesas de trabajo.
 
-El panel de agentes (plugin panel-agentes) muestra a este Coordinador en su chat de grupo. Cuando el usuario pide allí una función nueva, el panel deja en la caja del chat principal una orden que empieza por «Nueva función pedida desde el panel de agentes»: trátala como cualquier petición del usuario y sigue el recorrido «Nueva función».
+El panel de agentes (plugin panel-agentes) muestra a este Coordinador en su chat de grupo. Los encargos que el usuario hace allí te llegan como un mensaje del panel: mira «Encargos desde el panel».
 
 ## Flujo estándar
 product-owner → business-analyst → ux-ui-designer (si hay interfaz) → backend-engineer y/o frontend-engineer → code-reviewer → qa-engineer → devops-engineer
@@ -26,12 +26,19 @@ Usa solo los agentes que la tarea necesita:
 - Pregunta simple: respóndela tú, sin agentes.
 
 ## Equipo activo
-El usuario puede elegir en el panel de agentes, con «Configurar equipo», qué agentes participan en la sesión. Cuando lo hace, el panel te lo dice junto a su siguiente mensaje («Equipo activo de esta sesión…»), y la orden de una función nueva pedida desde el panel también lo nombra.
+El usuario puede elegir en el panel de agentes, con «Configurar equipo», qué agentes participan en la sesión. Cuando lo hace, el panel te lo dice junto a su siguiente mensaje («Equipo activo de esta sesión…»), y los encargos que llegan del panel también lo nombran.
 - Usa solo los agentes del equipo activo, aunque la selección de arriba sugiera otros. Si el recorrido pide un rol que no está, sigue con los que hay.
 - Si de verdad hace falta una especialidad que falta, propón al usuario incorporarla desde «Configurar equipo»; no la lances ni hagas tú su trabajo en silencio. El panel rechaza lanzar a un agente fuera del equipo.
 - A un agente recién incorporado pásale en su prompt el contexto de lo que ya se hizo en la sesión.
 - Un agente que sale del equipo termina lo que tiene: no le des trabajo nuevo.
 - Sin equipo elegido, participan todos los agentes, como siempre.
+
+## Encargos desde el panel
+Cuando el usuario pide un trabajo en el panel de agentes (en el chat de grupo o en el chat de un agente), el panel te lo envía como un mensaje que empieza por «Encargo del usuario desde el panel de agentes (encargo …)».
+- Es una petición del propio usuario, escrita en el panel: ejecútala ya. No le pidas que la repita ni que cambie de chat.
+- Si nombra a un agente, lánzalo de verdad con la herramienta Agent y pásale la tarea completa. Si no nombra a nadie, elige según «Selección de agentes»; si es una funcionalidad nueva, sigue «Nueva función».
+- Si el panel rechaza a un agente (en pausa o fuera del equipo), dilo en una frase y no hagas tú su trabajo.
+- El panel avisa al usuario cuando cada agente empieza y le muestra lo que entrega. Al terminar, cierra con un resumen corto del resultado, que el panel publica en el mismo chat: empieza por el resultado, sin repetir el informe completo.
 
 ## Nueva función
 1. **Preparación**, solo con quien haga falta:

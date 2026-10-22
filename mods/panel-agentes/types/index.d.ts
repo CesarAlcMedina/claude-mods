@@ -49,15 +49,33 @@ export type TeamOffer = {
   roles: string[]
   /** The message they get once in; none for a plain proposal. */
   messageId?: string
+  /** The work they get once in, handed to the main session for them. */
+  task?: string
 }
 
-/** A new function the Coordinador handed to the main session. */
+/**
+ * Where a piece of work asked in the panel stands: taken by the panel,
+ * entered in the main session, an agent launched for it, its result given,
+ * answered with no agent, stopped before its result, or never sent.
+ */
+export type RequestStatus = 'recibido' | 'enviado' | 'iniciado' | 'terminado' | 'sin-agentes' | 'detenido' | 'no-enviado'
+
+/** Work the Coordinador handed to the main session from the panel. */
 export type PanelRequest = {
   id: string
   goal: string
   at: number
   /** Seen entering the main session as a prompt. */
   isSent?: true
+  status?: RequestStatus
+  /** The chat it was asked in, where its progress and result are posted. */
+  channel?: string
+  /** The roles named to do it; none leaves the choice to the main session. */
+  roles?: string[]
+  /** The agents launched for it. */
+  runIds?: string[]
+  /** The main session's turns spent on it. */
+  turnIds?: string[]
 }
 
 /** One line of a chat: a role's own channel, or `grupo` for the team's. */
@@ -111,6 +129,8 @@ declare module 'claude-code' {
       /** The open chat shows its earlier messages too, not only the last ones. */
       earlier: boolean
       requests: PanelRequest[]
+      /** The request the main session is working on, while it does. */
+      driving: string | null
       /** A line for the person above the team, such as an order left to send. */
       notice: string | null
       /** This session's team. */
