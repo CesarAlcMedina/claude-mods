@@ -528,7 +528,7 @@ test('un encargo en el chat de un agente, o con @ en el grupo, llega al Coordina
   on('model.fork', (_, e) => {
     prompts.push(e.prompt)
     const said = (text: string) => ({ value: { isAnswered: true as const, text, usage } })
-    if (e.prompt.includes('eres el Coordinador')) return said('Se lo encargo a Investigación.\nENCARGO: @research compara los precios de Acme y Globex')
+    if (e.prompt.includes('eres el Coordinador')) return said('Se lo encargo a Investigación.\nENCARGO: @research compara los precios de Acme y Globex y consulta a @qa qué probar')
     if (e.prompt.includes('agente QA del')) return said('Se lo paso al Coordinador para que me lance.\nENCARGO: Prueba el login con tres usuarios')
     if (e.prompt.includes('agente Investigación del')) return said('Vale, me pongo.\n**ENCARGO:** Investiga la librería pdfkit')
     return said('Opinión del PO.')
@@ -576,7 +576,10 @@ test('un encargo en el chat de un agente, o con @ en el grupo, llega al Coordina
   await ui.input({ key: 'entrada-grupo-1', text: '¿Me miras los precios de Acme y Globex?' })
   expect(await shows(/^Se lo encargo a Investigación\.\n\nRecibido\. Se lo encargo a Investigación\./)).toBe(true)
   await until(() => submits.length === 4)
-  expect(submits.at(-1)).toContain('«compara los precios de Acme y Globex»')
+  expect(submits.at(-1)).toContain('«compara los precios de Acme y Globex y consulta a @qa qué probar»')
+  // Only the alias that opens the line does the work.
+  expect(submits.at(-1)).toContain('Agente: Investigación (agent-control-center:research-agent)')
+  expect(submits.at(-1)).not.toContain('qa-engineer)')
   await ui.unmount()
 })
 
@@ -1154,6 +1157,7 @@ test('los agentes publican avances y se consultan entre ellos en el chat', async
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('agent.spawn', () => ({ model: 'test', agentId: 'a1' }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('tool.call', () => ({ result: {} }))
   on('prompt.submit', (_, e) => {
     if (e.origin.kind === 'plugin') submits.push(e.text)
     return { text: e.text }
@@ -1173,6 +1177,9 @@ test('los agentes publican avances y se consultan entre ellos en el chat', async
   await ui.press({ key: 'chat-grupo' })
   await ui.input({ key: 'entrada-grupo-0', text: 'Investiga qué navegadores usan nuestros clientes' })
   await until(() => submits.length === 1)
+  // The order asks for progress and for consulting with the panel's tools.
+  expect(submits[0]).toContain('pídele que publique sus avances con mcp__panel-agentes__avance')
+  expect(submits[0]).toContain('que lo haga él con esa herramienta: no lances tú al otro')
   await $.turn.start({ text: '', turnId: 'm1' })
   // The Coordinador tells each step of the flow.
   expect(await tool({ tool: 'mcp__panel-agentes__avance', texto: 'Lanzo a Investigación para ver los navegadores.' })).toMatchObject({ result: 'Publicado en el panel.' })
@@ -1187,6 +1194,12 @@ test('los agentes publican avances y se consultan entre ellos en el chat', async
     background: true,
     fork: false,
   })
+
+  // What it does shows on its own, a quiet line at most every 20 s.
+  await $.tool.call({ tool: 'WebSearch', query: 'navegadores más usados 2026', agentId: 'a1' } as never)
+  await $.tool.call({ tool: 'WebFetch', url: 'https://example.com/a', prompt: 'x', agentId: 'a1' } as never)
+  expect(await ui.find({ type: 'Text', text: /^Investigación busca en la web «navegadores más usados 2026»…$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /lee example\.com/ })).toBeUndefined()
 
   // The agent at work posts its progress in the chat it was asked in.
   expect(await tool({ tool: 'mcp__panel-agentes__avance', texto: 'Reviso las analíticas del último mes.', agentId: 'a1' })).toMatchObject({ result: 'Publicado en el panel.' })

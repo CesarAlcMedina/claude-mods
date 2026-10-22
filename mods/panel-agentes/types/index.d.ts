@@ -20,6 +20,8 @@ export type AgentRun = {
   isResumed?: true
   /** When it started, to tell which request of the panel's it answers. */
   startedAt?: number
+  /** When the panel last noted in a chat what it was doing. */
+  notedAt?: number
 }
 
 /** The agents a session works with, chosen under «Configurar equipo». */

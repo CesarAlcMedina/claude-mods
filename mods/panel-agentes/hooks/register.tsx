@@ -876,8 +876,11 @@ const splitWork = (text: string) => {
   const cut = split.findIndex(line => TO_WORK.test(line))
   if (cut < 0) return { kept: text, task: '', roles: [] as string[] }
   const line = split.slice(cut).join('\n').replace(TO_WORK, '').trim()
-  const roles = ordered(wordsOf(line).flatMap(rolesFor))
-  const task = line.replace(/^(?:@[\p{L}/-]+[\s,:]*)+/u, '').trim() || line
+  const lead = /^(?:@[\p{L}/-]+[\s,:]*)+/u.exec(line)?.[0] ?? ''
+  // The doers are the aliases that open the line; one named inside the task
+  // is only part of what to do («que consulte a @qa»).
+  const roles = ordered(wordsOf(lead || line).flatMap(rolesFor))
+  const task = line.slice(lead.length).trim() || line
   return { kept: split.slice(0, cut).join('\n').trim(), task, roles }
 }
 
@@ -1026,6 +1029,7 @@ const handOff = async ($: EngineInterface, goal: string, team: SessionTeam, role
     `«${goal}»`,
     who,
     crew,
+    `En el prompt de cada agente que lances, pídele que publique sus avances con ${AVANCE} (una frase al empezar, en cada paso importante y antes de entregar) y que, si necesita algo de otro rol, se lo pregunte con ${CONSULTAR}. Si el encargo pide que un agente consulte a otro, que lo haga él con esa herramienta: no lances tú al otro. Cuenta tú cada paso del flujo con ${AVANCE}.`,
     'Ejecútalo ya, sin pedirle que lo repita ni que cambie de chat. Al terminar, da un resumen corto del resultado: el panel se lo muestra.',
   ]
     .filter(Boolean)
@@ -1149,8 +1153,59 @@ const consult = async ($: EngineInterface, agentId: string | undefined, who: str
 // A long report is shown in part: the whole one is under Entregas recientes.
 const REPORT_CHARS = 1500
 
-const excerpt = (text: string) =>
-  text.length <= REPORT_CHARS ? text : `${summaryOf(text)}\n\n_El informe completo está en Entregas recientes._`
+// Whole paragraphs while they fit, the first one cut if even it does not.
+const excerpt = (text: string) => {
+  if (text.length <= REPORT_CHARS) return text
+  const kept: string[] = []
+  for (const part of text.split(/\n\s*\n/)) {
+    if ([...kept, part].join('\n\n').length > REPORT_CHARS) break
+    kept.push(part)
+  }
+  const head = kept.length > 0 ? kept.join('\n\n') : short(text, REPORT_CHARS)
+  return `${head}\n\n_El informe completo está en Entregas recientes._`
+}
+
+// What an agent at work on a request is doing, from the tool it calls: a
+// quiet line in the request's chat, at most one every NOTE_MS per agent,
+// whether or not the agent posts progress of its own.
+const NOTE_MS = 20_000
+
+const doingOf = (tool: string, input: Record<string, unknown>) => {
+  const text = (key: string) => (typeof input[key] === 'string' ? (input[key] as string) : '')
+  const file = (key: string) => text(key).split('/').filter(Boolean).at(-1) ?? ''
+  const host = (url: string) => /^https?:\/\/([^/]+)/.exec(url)?.[1] ?? url
+  switch (tool) {
+    case 'WebSearch':
+      return `busca en la web «${short(text('query'), 80)}»`
+    case 'WebFetch':
+      return `lee ${host(text('url'))}`
+    case 'Read':
+      return `lee ${file('file_path')}`
+    case 'Grep':
+      return `busca «${short(text('pattern'), 60)}» en el código`
+    case 'Glob':
+      return `busca archivos ${short(text('pattern'), 60)}`
+    case 'Edit':
+    case 'Write':
+      return `edita ${file('file_path')}`
+    case 'Bash':
+      return `ejecuta ${short(text('command').split('\n')[0] ?? '', 70)}`
+    default:
+      return undefined
+  }
+}
+
+const noteWork = async ($: EngineInterface, agentId: string, tool: string, input: Record<string, unknown>) => {
+  const asked = (await read($, requests)).find(one => one.runIds?.includes(agentId))
+  const run = (await read($, runs)).find(one => one.id === agentId)
+  const doing = doingOf(tool, input)
+  if (asked === undefined || run === undefined || doing === undefined) return
+  const now = Date.now()
+  if (run.notedAt !== undefined && now - run.notedAt < NOTE_MS) return
+  await update($, runs, list => list.map(one => (one.id === agentId ? { ...one, notedAt: now } : one)))
+  await update($, chat, all => [...all, note(asked.channel ?? GROUP, `${labelOf(run.role)} ${doing}…`)])
+  await follow($, asked.channel ?? GROUP)
+}
 
 // Anything else: the agents picked answer the Coordinador in turn, each
 // seeing what the one before said, and it answers the person once.
@@ -1481,6 +1536,7 @@ export const register: Register = on => {
           one.id === agentId ? { ...one, tools: one.tools + 1, lastTool: e.tool } : one,
         ),
       )
+      await noteWork($, agentId, e.tool, e as unknown as Record<string, unknown>)
     }
 
     return next(e)
