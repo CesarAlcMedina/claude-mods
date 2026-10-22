@@ -528,7 +528,7 @@ test('un encargo en el chat de un agente, o con @ en el grupo, llega al Coordina
   on('model.fork', (_, e) => {
     prompts.push(e.prompt)
     const said = (text: string) => ({ value: { isAnswered: true as const, text, usage } })
-    if (e.prompt.includes('eres el Coordinador')) return said('Se lo encargo a Investigación.\nENCARGO: @research compara los precios de Acme y Globex')
+    if (e.prompt.includes('eres el Coordinador')) return said('Se lo encargo a Investigación.\nENCARGO: @research compara los precios de Acme y Globex y consulta a @qa qué probar')
     if (e.prompt.includes('agente QA del')) return said('Se lo paso al Coordinador para que me lance.\nENCARGO: Prueba el login con tres usuarios')
     if (e.prompt.includes('agente Investigación del')) return said('Vale, me pongo.\n**ENCARGO:** Investiga la librería pdfkit')
     return said('Opinión del PO.')
@@ -576,7 +576,10 @@ test('un encargo en el chat de un agente, o con @ en el grupo, llega al Coordina
   await ui.input({ key: 'entrada-grupo-1', text: '¿Me miras los precios de Acme y Globex?' })
   expect(await shows(/^Se lo encargo a Investigación\.\n\nRecibido\. Se lo encargo a Investigación\./)).toBe(true)
   await until(() => submits.length === 4)
-  expect(submits.at(-1)).toContain('«compara los precios de Acme y Globex»')
+  expect(submits.at(-1)).toContain('«compara los precios de Acme y Globex y consulta a @qa qué probar»')
+  // Only the alias that opens the line does the work.
+  expect(submits.at(-1)).toContain('Agente: Investigación (agent-control-center:research-agent)')
+  expect(submits.at(-1)).not.toContain('qa-engineer)')
   await ui.unmount()
 })
 
@@ -1144,4 +1147,77 @@ test('la barra del límite de 5 h: sin datos, 0 %, intermedio, límite, desactua
     expect(await other.find({ type: 'Text', text: /^Límite de sesión · 5 h$/ })).toBeDefined()
     await other.unmount()
   }
+})
+
+test('los agentes publican avances y se consultan entre ellos en el chat', async ($, on) => {
+  const prompts: string[] = []
+  const submits: string[] = []
+  const usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
+  mock.store(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('agent.spawn', () => ({ model: 'test', agentId: 'a1' }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('tool.call', () => ({ result: {} }))
+  on('prompt.submit', (_, e) => {
+    if (e.origin.kind === 'plugin') submits.push(e.text)
+    return { text: e.text }
+  })
+  on('model.complete', () => ({ value: { isAnswered: true as const, text: 'TIPO: encargo\n@research: investigar', usage } }))
+  on('model.fork', (_, e) => {
+    prompts.push(e.prompt)
+    return { value: { isAnswered: true as const, text: 'Chrome y Firefox, los dos.', usage } }
+  })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const shows = async (pattern: RegExp) => (await ui.find({ type: 'Markdown', text: pattern })) !== undefined
+  const until = async (done: () => boolean) => {
+    for (let i = 0; i < 200 && !done(); i++) await ui.find({ key: 'caja' })
+  }
+  const tool = (input: Record<string, string>) => $.tool.call(input as never) as Promise<{ result?: unknown }>
+
+  await ui.press({ key: 'chat-grupo' })
+  await ui.input({ key: 'entrada-grupo-0', text: 'Investiga qué navegadores usan nuestros clientes' })
+  await until(() => submits.length === 1)
+  // The order asks for progress and for consulting with the panel's tools.
+  expect(submits[0]).toContain('pídele que publique sus avances con mcp__panel-agentes__avance')
+  expect(submits[0]).toContain('que lo haga él con esa herramienta: no lances tú al otro')
+  await $.turn.start({ text: '', turnId: 'm1' })
+  // The Coordinador tells each step of the flow.
+  expect(await tool({ tool: 'mcp__panel-agentes__avance', texto: 'Lanzo a Investigación para ver los navegadores.' })).toMatchObject({ result: 'Publicado en el panel.' })
+  expect(await shows(/^Lanzo a Investigación para ver los navegadores\.$/)).toBe(true)
+  await $.agent.spawn({
+    tool_use_id: 't',
+    prompt: 'Investiga',
+    description: 'Navegadores de los clientes',
+    subagentType: 'agent-control-center:research-agent',
+    provider: PROVIDER,
+    parentModel: 'test',
+    background: true,
+    fork: false,
+  })
+
+  // What it does shows on its own, a quiet line at most every 20 s.
+  await $.tool.call({ tool: 'WebSearch', query: 'navegadores más usados 2026', agentId: 'a1' } as never)
+  await $.tool.call({ tool: 'WebFetch', url: 'https://example.com/a', prompt: 'x', agentId: 'a1' } as never)
+  expect(await ui.find({ type: 'Text', text: /^Investigación busca en la web «navegadores más usados 2026»…$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /lee example\.com/ })).toBeUndefined()
+
+  // The agent at work posts its progress in the chat it was asked in.
+  expect(await tool({ tool: 'mcp__panel-agentes__avance', texto: 'Reviso las analíticas del último mes.', agentId: 'a1' })).toMatchObject({ result: 'Publicado en el panel.' })
+  expect(await shows(/^Reviso las analíticas del último mes\.$/)).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /^Investigación$/ })).toBeDefined()
+
+  // It asks QA in the group chat; QA answers there, and the agent gets it.
+  const asked = await tool({ tool: 'mcp__panel-agentes__consultar', agente: 'qa', pregunta: '¿En qué navegadores probáis?', agentId: 'a1' })
+  expect(asked).toMatchObject({ result: 'QA contesta: Chrome y Firefox, los dos.' })
+  expect(prompts.at(-1)).toContain('eres el agente QA del')
+  expect(prompts.at(-1)).toContain('Mensaje nuevo del agente Investigación')
+  expect(prompts.at(-1)).toContain('@qa ¿En qué navegadores probáis?')
+  expect(await shows(/^@qa ¿En qué navegadores probáis\?$/)).toBe(true)
+  expect(await shows(/^Chrome y Firefox, los dos\.$/)).toBe(true)
+
+  // Someone unknown, or itself: told so, nothing posted.
+  expect(await tool({ tool: 'mcp__panel-agentes__consultar', agente: 'marketing', pregunta: '¿Y tú?', agentId: 'a1' })).toMatchObject({ result: expect.stringContaining('No conozco a «marketing»') })
+  expect(await tool({ tool: 'mcp__panel-agentes__consultar', agente: 'research', pregunta: '¿Y tú?', agentId: 'a1' })).toMatchObject({ result: 'No puedes consultarte a ti mismo.' })
+  expect(prompts.length).toBe(1)
+  await ui.unmount()
 })

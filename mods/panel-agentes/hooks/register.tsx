@@ -876,8 +876,11 @@ const splitWork = (text: string) => {
   const cut = split.findIndex(line => TO_WORK.test(line))
   if (cut < 0) return { kept: text, task: '', roles: [] as string[] }
   const line = split.slice(cut).join('\n').replace(TO_WORK, '').trim()
-  const roles = ordered(wordsOf(line).flatMap(rolesFor))
-  const task = line.replace(/^(?:@[\p{L}/-]+[\s,:]*)+/u, '').trim() || line
+  const lead = /^(?:@[\p{L}/-]+[\s,:]*)+/u.exec(line)?.[0] ?? ''
+  // The doers are the aliases that open the line; one named inside the task
+  // is only part of what to do («que consulte a @qa»).
+  const roles = ordered(wordsOf(lead || line).flatMap(rolesFor))
+  const task = line.slice(lead.length).trim() || line
   return { kept: split.slice(0, cut).join('\n').trim(), task, roles }
 }
 
@@ -1026,6 +1029,7 @@ const handOff = async ($: EngineInterface, goal: string, team: SessionTeam, role
     `«${goal}»`,
     who,
     crew,
+    `En el prompt de cada agente que lances, pídele que publique sus avances con ${AVANCE} (una frase al empezar, en cada paso importante y antes de entregar) y que, si necesita algo de otro rol, se lo pregunte con ${CONSULTAR}. Si el encargo pide que un agente consulte a otro, que lo haga él con esa herramienta: no lances tú al otro. Cuenta tú cada paso del flujo con ${AVANCE}.`,
     'Ejecútalo ya, sin pedirle que lo repita ni que cambie de chat. Al terminar, da un resumen corto del resultado: el panel se lo muestra.',
   ]
     .filter(Boolean)
@@ -1090,11 +1094,118 @@ const drivingOf = async ($: EngineInterface) => {
   return id === null ? undefined : (await read($, requests)).find(one => one.id === id)
 }
 
+// The panel's tools, for the agents at work and the Coordinador: a line of
+// progress in the chat the work was asked in, and a question to another
+// role, asked and answered in the group chat. Only the main session's agents
+// reach them: a plugin's hooks never see the tool calls of an agent the
+// plugin itself launched, which is why the work runs in the main session.
+const AVANCE = 'mcp__panel-agentes__avance'
+const CONSULTAR = 'mcp__panel-agentes__consultar'
+const PROGRESS_CHARS = 600
+
+// Who is calling, and where its work shows: an agent of a request posts in
+// the request's chat; the main session posts there as the Coordinador.
+const whereOf = async ($: EngineInterface, agentId?: string) => {
+  const list = await read($, requests)
+  if (agentId === undefined) {
+    const asked = await drivingOf($)
+    return { role: COORD, channel: asked?.channel ?? GROUP }
+  }
+  const role = (await read($, runs)).find(one => one.id === agentId)?.role ?? COORD
+  const asked = list.find(one => one.runIds?.includes(agentId))
+  return { role, channel: asked?.channel ?? GROUP }
+}
+
+const progress = async ($: EngineInterface, agentId: string | undefined, said: string) => {
+  const text = said.trim()
+  if (text === '') return 'Falta el texto del avance.'
+  const { role, channel } = await whereOf($, agentId)
+  await post($, channel, role, short(text, PROGRESS_CHARS))
+  return 'Publicado en el panel.'
+}
+
+// A question to another role: posted in the group as the one asking, and
+// answered there by the one asked, speaking as its role with what the
+// session holds. The answer goes back to the agent that asked.
+const consult = async ($: EngineInterface, agentId: string | undefined, who: string, question: string) => {
+  const asked = question.trim()
+  const target = roleNamed(who.trim().replace(/^@/, '').toLowerCase())
+  const known = TEAM.map(one => one.aliases[0]).join(', ')
+  if (asked === '') return 'Falta la pregunta.'
+  if (target === undefined) return `No conozco a «${who}». Puedes consultar a: ${known}.`
+  const { role } = await whereOf($, agentId)
+  if (target === role) return 'No puedes consultarte a ti mismo.'
+  const team = await teamOf($)
+  if (isOut(team, target)) {
+    return `${labelOf(target)} no está en el equipo de esta sesión. Sigue sin su respuesta y dilo en tu informe; el usuario puede incorporarlo desde el panel.`
+  }
+  const alias = TEAM.find(one => one.role === target)?.aliases[0] ?? target
+  const message: ChatMessage = { id: crypto.randomUUID(), channel: GROUP, from: role, text: `@${alias} ${asked}` }
+  await update($, chat, all => [...all, message])
+  await follow($, GROUP)
+  await answer($, GROUP, { role: target, mustAnswer: true }, message, HOPS, { left: 0 })
+  const lines = (await read($, chat)).filter(one => one.channel === GROUP && !one.isPending)
+  const at = lines.findIndex(one => one.id === message.id)
+  const reply = lines.slice(at + 1).find(one => one.from === target)
+  return reply ? `${labelOf(target)} contesta: ${reply.text}` : `${labelOf(target)} no pudo contestar. Sigue con lo que tienes.`
+}
+
 // A long report is shown in part: the whole one is under Entregas recientes.
 const REPORT_CHARS = 1500
 
-const excerpt = (text: string) =>
-  text.length <= REPORT_CHARS ? text : `${summaryOf(text)}\n\n_El informe completo está en Entregas recientes._`
+// Whole paragraphs while they fit, the first one cut if even it does not.
+const excerpt = (text: string) => {
+  if (text.length <= REPORT_CHARS) return text
+  const kept: string[] = []
+  for (const part of text.split(/\n\s*\n/)) {
+    if ([...kept, part].join('\n\n').length > REPORT_CHARS) break
+    kept.push(part)
+  }
+  const head = kept.length > 0 ? kept.join('\n\n') : short(text, REPORT_CHARS)
+  return `${head}\n\n_El informe completo está en Entregas recientes._`
+}
+
+// What an agent at work on a request is doing, from the tool it calls: a
+// quiet line in the request's chat, at most one every NOTE_MS per agent,
+// whether or not the agent posts progress of its own.
+const NOTE_MS = 20_000
+
+const doingOf = (tool: string, input: Record<string, unknown>) => {
+  const text = (key: string) => (typeof input[key] === 'string' ? (input[key] as string) : '')
+  const file = (key: string) => text(key).split('/').filter(Boolean).at(-1) ?? ''
+  const host = (url: string) => /^https?:\/\/([^/]+)/.exec(url)?.[1] ?? url
+  switch (tool) {
+    case 'WebSearch':
+      return `busca en la web «${short(text('query'), 80)}»`
+    case 'WebFetch':
+      return `lee ${host(text('url'))}`
+    case 'Read':
+      return `lee ${file('file_path')}`
+    case 'Grep':
+      return `busca «${short(text('pattern'), 60)}» en el código`
+    case 'Glob':
+      return `busca archivos ${short(text('pattern'), 60)}`
+    case 'Edit':
+    case 'Write':
+      return `edita ${file('file_path')}`
+    case 'Bash':
+      return `ejecuta ${short(text('command').split('\n')[0] ?? '', 70)}`
+    default:
+      return undefined
+  }
+}
+
+const noteWork = async ($: EngineInterface, agentId: string, tool: string, input: Record<string, unknown>) => {
+  const asked = (await read($, requests)).find(one => one.runIds?.includes(agentId))
+  const run = (await read($, runs)).find(one => one.id === agentId)
+  const doing = doingOf(tool, input)
+  if (asked === undefined || run === undefined || doing === undefined) return
+  const now = Date.now()
+  if (run.notedAt !== undefined && now - run.notedAt < NOTE_MS) return
+  await update($, runs, list => list.map(one => (one.id === agentId ? { ...one, notedAt: now } : one)))
+  await update($, chat, all => [...all, note(asked.channel ?? GROUP, `${labelOf(run.role)} ${doing}…`)])
+  await follow($, asked.channel ?? GROUP)
+}
 
 // Anything else: the agents picked answer the Coordinador in turn, each
 // seeing what the one before said, and it answers the person once.
@@ -1293,6 +1404,31 @@ export const register: Register = on => {
       name: 'panel-agentes',
       description: 'Abre el panel de agentes del Agent Control Center; con un mensaje, lo escribe en su chat de grupo',
     })
+    await $.tool
+      .register({
+        name: 'avance',
+        description:
+          'Panel de agentes: publica en el chat del panel, en una frase, qué estás haciendo o qué encontraste. Úsalo al empezar, en cada paso importante y antes de entregar.',
+        inputSchema: { type: 'object', properties: { texto: { type: 'string', description: 'El avance, en una frase' } }, required: ['texto'] },
+        isDeferred: false,
+      })
+      .catch(() => undefined)
+    await $.tool
+      .register({
+        name: 'consultar',
+        description:
+          'Panel de agentes: pregunta algo concreto a otro agente del equipo (po, ba, ux, backend, frontend, reviewer, qa, devops o research) en el chat de grupo, y recibe su respuesta. Solo cuando la necesites para seguir.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            agente: { type: 'string', description: 'A quién: po, ba, ux, backend, frontend, reviewer, qa, devops o research' },
+            pregunta: { type: 'string', description: 'La pregunta, concreta' },
+          },
+          required: ['agente', 'pregunta'],
+        },
+        isDeferred: false,
+      })
+      .catch(() => undefined)
     const usage = await $.session.usage().catch(() => undefined)
     if (usage !== undefined) await record($, usage.rateLimits, true)
     keepTicking($)
@@ -1380,6 +1516,16 @@ export const register: Register = on => {
     return started
   })
 
+  on('tool.call', { tool: AVANCE }, async ($, e) => {
+    const input = e as unknown as { texto?: string }
+    return { result: await progress($, e.agentId, String(input.texto ?? '')) }
+  })
+
+  on('tool.call', { tool: CONSULTAR }, async ($, e) => {
+    const input = e as unknown as { agente?: string; pregunta?: string }
+    return { result: await consult($, e.agentId, String(input.agente ?? ''), String(input.pregunta ?? '')) }
+  })
+
   on('tool.call', async ($, e, next) => {
     const agentId = e.agentId
     if (agentId !== undefined) {
@@ -1390,6 +1536,7 @@ export const register: Register = on => {
           one.id === agentId ? { ...one, tools: one.tools + 1, lastTool: e.tool } : one,
         ),
       )
+      await noteWork($, agentId, e.tool, e as unknown as Record<string, unknown>)
     }
 
     return next(e)

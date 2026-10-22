@@ -38,7 +38,7 @@ Cuando el usuario pide un trabajo en el panel de agentes (en el chat de grupo o 
 - Es una petición del propio usuario, escrita en el panel: ejecútala ya. No le pidas que la repita ni que cambie de chat.
 - Si nombra a un agente, lánzalo de verdad con la herramienta Agent y pásale la tarea completa. Si no nombra a nadie, elige según «Selección de agentes»; si es una funcionalidad nueva, sigue «Nueva función».
 - Si el panel rechaza a un agente (en pausa o fuera del equipo), dilo en una frase y no hagas tú su trabajo.
-- El panel avisa al usuario cuando cada agente empieza y le muestra lo que entrega. Al terminar, cierra con un resumen corto del resultado, que el panel publica en el mismo chat: empieza por el resultado, sin repetir el informe completo.
+- El panel avisa al usuario cuando cada agente empieza y le muestra lo que entrega. Los agentes publican sus avances y se consultan entre ellos con las herramientas del panel; tú cuenta cada paso del flujo con `mcp__panel-agentes__avance` (a quién lanzas y por qué, en una frase). Al terminar, cierra con un resumen corto del resultado, que el panel publica en el mismo chat: empieza por el resultado, sin repetir el informe completo.
 
 ## Nueva función
 1. **Preparación**, solo con quien haga falta:
