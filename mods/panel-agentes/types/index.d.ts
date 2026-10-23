@@ -103,6 +103,29 @@ export type PlanUsage = {
   seenAt: number
 }
 
+/** What the Coordinador is doing in a turn, as its tools show it. */
+export type CoordActivity = 'investigando' | 'coordinando' | 'trabajando'
+
+/** The Coordinador, the main session, as the panel last saw it. */
+export type CoordState = {
+  /** In a turn now. */
+  isBusy: boolean
+  /** When its turn began. */
+  since?: number
+  /** What it attends to: the panel's request, or the person's last prompt. */
+  task?: string
+  /** The panel request it works on, while it does. */
+  requestId?: string
+  activity?: CoordActivity
+  /** Its last tool call, in words. */
+  doing?: string
+  lastTool?: string
+  /** Tool calls since its task began. */
+  tools: number
+  /** When the panel last noted in a chat what it was doing. */
+  notedAt?: number
+}
+
 /** Which cards the team tabs show. */
 export type TeamFilter = 'todos' | 'en-curso' | 'completados' | 'disponibles'
 
@@ -146,6 +169,8 @@ declare module 'claude-code' {
       limitOpen: boolean
       /** Text a chat's field starts with, such as «Nueva tarea: ». */
       draft: { channel: string; text: string } | null
+      /** The Coordinador's activity, for its card. */
+      coord: CoordState
     }
   }
 }

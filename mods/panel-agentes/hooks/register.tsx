@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, SessionRateLimit, TurnStepInput } from 'claude-code'
 
-import type { AgentRun, ChatMessage, PanelRequest, RequestStatus, RunStatus, SessionTeam, TeamFilter } from '../types'
+import type { AgentRun, ChatMessage, CoordActivity, CoordState, PanelRequest, RequestStatus, RunStatus, SessionTeam, TeamFilter } from '../types'
 
 const PANE = 'panel-agentes'
 const TITLE = 'Agentes'
@@ -33,6 +33,7 @@ const planUsage = atom({ plugin: 'panel-agentes', key: 'usage' } as const, null)
 const tick = atom({ plugin: 'panel-agentes', key: 'tick' } as const, 0)
 const limitOpen = atom({ plugin: 'panel-agentes', key: 'limitOpen' } as const, false)
 const draft = atom({ plugin: 'panel-agentes', key: 'draft' } as const, null)
+const coordAtom = atom({ plugin: 'panel-agentes', key: 'coord' } as const, { isBusy: false, tools: 0 })
 
 // The team in the order the coordinador skill hands work along, with the
 // short names an @mention in the group chat may use.
@@ -44,7 +45,6 @@ const TEAM: { role: string; label: string; aliases: string[]; job: string }[] = 
   { role: 'code-reviewer', label: 'Revisión de código', aliases: ['reviewer', 'revision', 'revisión'], job: 'calidad, mantenibilidad, seguridad, rendimiento y errores lógicos del código' },
   { role: 'qa-engineer', label: 'QA', aliases: ['qa'], job: 'estrategia y planes de prueba, escenarios positivos, negativos y de borde, y defectos' },
   { role: 'devops-engineer', label: 'DevOps', aliases: ['devops'], job: 'CI/CD, Docker y automatización de builds y despliegues' },
-  { role: 'research-agent', label: 'Investigación', aliases: ['research', 'investigacion', 'investigación'], job: 'investigar tecnologías, documentación y buenas prácticas, con fuentes' },
 ]
 
 // Roles merged into another: Product Owner and Analista de negocio are now
@@ -61,6 +61,7 @@ const FORMER: Record<string, string> = {
   'software-engineer': 'Ingeniería',
   'product-owner': 'Product Owner',
   'business-analyst': 'Analista de negocio',
+  'research-agent': 'Investigación',
 }
 
 // The Coordinador is the main session itself, running agent-control-center's
@@ -75,6 +76,16 @@ const FROM_PANEL = 'Encargo del usuario desde el panel de agentes'
 // A request's id in its order, to know it again when it enters.
 const REQUEST_ID = /\(encargo ([0-9a-f]{8})\)/
 const ENGINEERS = ['backend-engineer', 'frontend-engineer', 'software-engineer']
+
+// Investigación is no longer a specialist: research is the Coordinador's own
+// work, done in the main session with its tools. Its names reach the
+// Coordinador, an agent of it already at work finishes, and its chat stays
+// as history, read only.
+const RETIRED = ['research-agent']
+const isRetired = (role: string) => RETIRED.includes(role)
+const COORD_ALIASES = ['coordinador', 'coord', 'research', 'investigacion', 'investigación']
+const COORD_JOB =
+  'dirigir al equipo y hacer él mismo las investigaciones: búsquedas, fuentes, comparativas e informes guardados en docs/investigaciones/ del proyecto'
 
 const labelOf = (role: string) =>
   role === ME
@@ -565,9 +576,13 @@ const isPass = (answer: string) => new RegExp(`^${PASS}\\.?$`, 'i').test(answer)
 const isQuestion = (text: string) => /[?¿]/.test(text)
 
 const roleNamed = (word: string) =>
-  TEAM.find(one => one.role === word || one.aliases.includes(word))?.role
+  TEAM.find(one => one.role === word || one.aliases.includes(word))?.role ??
+  (word === COORD || COORD_ALIASES.includes(word) ? COORD : undefined)
 
 const wordsOf = (text: string) => [...text.toLowerCase().matchAll(/@([\p{L}/-]+)/gu)].map(m => m[1] ?? '')
+
+// A message naming the Coordinador, or Investigación by one of its old names.
+const callsCoord = (text: string) => wordsOf(text).some(word => COORD_ALIASES.includes(word))
 
 const rolesFor = (word: string) => TEAM.filter(one => word === one.role || one.aliases.includes(word)).map(one => one.role)
 
@@ -627,10 +642,12 @@ type Pick = { kind: Kind; turns: Turn[]; missing: string[]; isAlone?: true }
 const pick = async ($: EngineInterface, history: ChatMessage[], text: string, crew: SessionTeam): Promise<Pick> => {
   const members = TEAM.filter(one => crew.roles.includes(one.role))
   const absent = crew.isChosen ? TEAM.filter(one => !crew.roles.includes(one.role)) : []
-  const team =
-    members.length > 0
-      ? members.map(one => `@${one.aliases[0]}: ${one.label}, ${one.job}`).join('\n')
-      : 'Nadie: el usuario no eligió ningún agente para esta sesión.'
+  const team = [
+    `@coordinador: Coordinador, la sesión principal, que suele ${COORD_JOB}`,
+    ...(members.length > 0
+      ? members.map(one => `@${one.aliases[0]}: ${one.label}, ${one.job}`)
+      : ['Ningún especialista más: el usuario no eligió ninguno para esta sesión.']),
+  ].join('\n')
   const prompt = [
     'Clasificas los mensajes del chat de grupo de un equipo de agentes de software y decides a quién consulta el Coordinador. Cada consulta cuesta: elige por la aportación concreta que necesita el mensaje, no solo por la especialidad.',
     `El equipo:\n${team}`,
@@ -641,8 +658,8 @@ const pick = async ($: EngineInterface, history: ChatMessage[], text: string, cr
     `Mensaje nuevo del usuario:\n\n${text}`,
     [
       'Primero, qué es el mensaje: «TIPO: estado» si pregunta cómo va un trabajo, qué falta o si algo está hecho; «TIPO: encargo» si pide al equipo que haga un trabajo que hay que ejecutar (investigar, construir, añadir o cambiar una funcionalidad, revisar código, probar, desplegar, redactar un entregable); «TIPO: otro» para todo lo demás (preguntas, opiniones, decisiones, saludos).',
-      'Para TIPO: encargo, si el trabajo es claramente de uno o dos agentes (una investigación, una revisión, unas pruebas), una línea por agente que debe hacerlo, así: @alias: la tarea. Si es una funcionalidad nueva que pasa por el flujo completo, ninguna línea.',
-      'Para TIPO: otro, a quién consultar:',
+      'Para TIPO: encargo, si el trabajo es claramente de uno o dos agentes (una revisión, unas pruebas), una línea por agente que debe hacerlo, así: @alias: la tarea. Una investigación (buscar información, consultar documentación o fuentes, comparar opciones, redactar un informe) es siempre del Coordinador: «@coordinador: la investigación», nunca de otro agente; si después hace falta otro agente, añade su línea. Si es una funcionalidad nueva que pasa por el flujo completo, ninguna línea.',
+      'Para TIPO: otro, a quién consultar (nunca @coordinador: él contesta con lo que reúna):',
       '- Lo normal es un solo agente. Elige un segundo solo si aporta algo distinto que el primero no puede dar: otra parte de la respuesta, otra evidencia, otro riesgo. Que dos roles tengan que ver con el tema no significa que deban contestar los dos.',
       '- Si el usuario comunica una decisión o confirma algo, elige uno solo: el que tiene que actuar o el que tiene algo que añadir. Nunca una ronda de confirmaciones.',
       '- Una pregunta del usuario siempre necesita a alguien que la conteste o pida la aclaración que falte.',
@@ -662,8 +679,8 @@ const pick = async ($: EngineInterface, history: ChatMessage[], text: string, cr
   const said = answer.replace(/^.*TIPO:.*$/im, '').replace(/^.*FUERA:.*$/im, '').trim()
   const named = turnsOf(said)
   const turns = named
-    .filter(turn => crew.roles.includes(turn.role))
-    .slice(0, PICKED)
+    .filter(turn => (turn.role === COORD ? kind === 'encargo' : crew.roles.includes(turn.role)))
+    .slice(0, kind === 'encargo' ? PICKED + 1 : PICKED)
     .map((turn, at) => ({ ...turn, mustAnswer: at === 0 }))
   const missing =
     kind === 'estado' ? [] : ordered([...turnsOf(outside), ...named].map(turn => turn.role).filter(role => isOut(crew, role)))
@@ -758,7 +775,7 @@ const TRUTH = [
 ].join('\n')
 
 // For whoever the person writes to directly: work to run goes on as an order.
-const WORK = `Si el usuario te encarga un trabajo que hay que ejecutar (investigar, buscar información, escribir o cambiar código, probar, revisar archivos, desplegar), no lo hagas ni lo simules en el chat: contesta en una frase que se lo pasas al Coordinador para que te lance de verdad, y añade al final una línea que empiece por «ENCARGO:» con la tarea completa y concreta, tal como debe hacerse. El panel te avisa aquí cuando empieces y cuando termines. Si solo pregunta, opina o decide, contesta sin esa línea.`
+const WORK = `Si el usuario te encarga un trabajo que hay que ejecutar (investigar, buscar información, escribir o cambiar código, probar, revisar archivos, desplegar), no lo hagas ni lo simules en el chat: contesta en una frase que se lo pasas al Coordinador para que te lance de verdad, y añade al final una línea que empiece por «ENCARGO:» con la tarea completa y concreta, tal como debe hacerse. Si es una investigación (buscar información, consultar documentación o fuentes, comparar opciones), la hace el Coordinador: la línea es «ENCARGO: @coordinador la investigación». El panel te avisa aquí cuando empieces y cuando termines. Si solo pregunta, opina o decide, contesta sin esa línea.`
 
 type Prompt = {
   role: string
@@ -798,7 +815,7 @@ const chatPrompt = ({ role, channel, group, before, message, since, turn, canRea
       ? `Si lo que ibas a aportar ya está dicho, o no tienes nada nuevo, responde solo con la palabra ${PASS}.`
       : `Si el mensaje ya no te pide nada (solo confirma, agradece o cierra el tema), o lo que ibas a decir ya está dicho, responde solo con la palabra ${PASS}: la conversación puede terminar ahí.`
   return [
-    `A partir de aquí no eres el asistente principal: eres el agente ${labelOf(role)} del Agent Control Center, que se ocupa de ${member?.job ?? 'su rol'}.`,
+    `A partir de aquí no eres el asistente principal: eres el agente ${labelOf(role)} del Agent Control Center, que se ocupa de ${member?.job ?? (role === COORD ? COORD_JOB : 'su rol')}.`,
     isConsulted
       ? `El Coordinador te consulta por un mensaje del usuario en el chat de grupo del panel de agentes, y le contestará con lo que reúna: dale solo tu aportación, sin dirigirte al usuario ni saludar. El equipo: ${team}.`
       : isGroup
@@ -849,7 +866,12 @@ const take = (roles: string[], budget: { left: number }): Turn[] => {
   return taken.map(role => ({ role, mustAnswer: false }))
 }
 
-const send = async ($: EngineInterface, channel: string, text: string) => {
+const send = async ($: EngineInterface, channel: string, text: string): Promise<void> => {
+  // A retired role's chat is history: what is written there goes to the group.
+  if (isRetired(channel)) {
+    await update($, view, () => GROUP)
+    return send($, GROUP, text)
+  }
   const said = text.trim()
   if (said === '') return
   const history = (await read($, chat)).filter(one => one.channel === channel)
@@ -857,7 +879,8 @@ const send = async ($: EngineInterface, channel: string, text: string) => {
   await update($, chat, lines => [...lines, message])
   await follow($, channel)
   const named = channel === GROUP ? addressed(said) : { roles: [channel], isNamed: true }
-  if (!named.isNamed) return coordinate($, channel, history, message)
+  // The Coordinador, or Investigación by an old name, takes it as one named.
+  if (!named.isNamed || (channel === GROUP && callsCoord(said))) return coordinate($, channel, history, message)
   const team = await teamOf($)
   const absent = channel === GROUP ? absentOf(said, team) : isOut(team, channel) ? [channel] : []
   if (absent.length > 0) await propose($, channel, absent, message.id)
@@ -875,9 +898,15 @@ const coordinate = async ($: EngineInterface, channel: string, history: ChatMess
   await update($, chat, all => [...all, { id, channel, from: COORD, text: '', isPending: true }])
   await follow($, channel)
   const team = await teamOf($)
-  const picked = await pick($, history, message.text, team)
+  const chosen = await pick($, history, message.text, team)
+  // Named by the person, the Coordinador does the work asked of it, and
+  // answers anything else itself.
+  const isCalled = callsCoord(message.text)
+  const picked: Pick =
+    isCalled && chosen.kind === 'otro' && chosen.turns.length === 0 ? { ...chosen, isAlone: true } : chosen
   const { kind, missing } = picked
-  const doers = picked.turns.map(turn => turn.role)
+  const named = picked.turns.map(turn => turn.role)
+  const doers = isCalled && kind === 'encargo' && !named.includes(COORD) ? [COORD, ...named] : named
   let handed: Handed | undefined
   let text: string | null
   if (kind === 'estado') {
@@ -923,7 +952,8 @@ const splitWork = (text: string) => {
   const lead = /^(?:@[\p{L}/-]+[\s,:]*)+/u.exec(line)?.[0] ?? ''
   // The doers are the aliases that open the line; one named inside the task
   // is only part of what to do («que consulte a @qa»).
-  const roles = ordered(wordsOf(lead || line).flatMap(rolesFor))
+  const words = wordsOf(lead || line)
+  const roles = [...(words.some(word => COORD_ALIASES.includes(word)) ? [COORD] : []), ...ordered(words.flatMap(rolesFor))]
   const task = line.slice(lead.length).trim() || line
   return { kept: split.slice(0, cut).join('\n').trim(), task, roles }
 }
@@ -1054,17 +1084,33 @@ const report = async ($: EngineInterface, history: ChatMessage[], message: ChatM
 type Handed = { text: string; deliver?: () => Promise<void> }
 
 const handOff = async ($: EngineInterface, goal: string, team: SessionTeam, roles: string[], channel: string): Promise<Handed> => {
-  if (team.isChosen && team.roles.length === 0) {
+  // Research is the Coordinador's own: it needs no specialist in the team.
+  const isMine = roles.includes(COORD)
+  if (!isMine && team.isChosen && team.roles.length === 0) {
     return { text: 'No hay ningún agente en el equipo de esta sesión, así que nadie puede trabajar en esto. Configura el equipo desde el panel y vuelve a pedírmelo.' }
   }
   const doers = ordered(roles.filter(role => !isOut(team, role)))
   const id = crypto.randomUUID().replace(/-/g, '').slice(0, 8)
-  const request: PanelRequest = { id, goal, at: Date.now(), status: 'recibido', channel, roles: doers, runIds: [], turnIds: [] }
+  const request: PanelRequest = {
+    id,
+    goal,
+    at: Date.now(),
+    status: 'recibido',
+    channel,
+    roles: isMine ? [COORD, ...doers] : doers,
+    runIds: [],
+    turnIds: [],
+  }
   await update($, requests, list => [...list, request].slice(-10))
-  const who =
-    doers.length > 0
-      ? `${doers.length === 1 ? 'Agente' : 'Agentes'}: ${doers.map(role => `${labelOf(role)} (${PREFIX}${role})`).join(', ')}. ${doers.length === 1 ? 'Lánzalo' : 'Lánzalos'} ahora con la herramienta Agent, con la tarea completa.`
-      : `No nombra agente: elige tú a quién lanzar y, si es una funcionalidad nueva, sigue el recorrido «Nueva función» de la skill ${SKILL}.`
+  const agents = `${doers.map(role => `${labelOf(role)} (${PREFIX}${role})`).join(', ')}`
+  const research = `según «Investigación» de la skill ${SKILL}: con tus propias herramientas (WebSearch, WebFetch, Read) y sin lanzar ningún subagente para ella`
+  const who = isMine
+    ? doers.length > 0
+      ? `Primero la investigación, que haces tú, el Coordinador, ${research}. Después, ${doers.length === 1 ? 'el agente' : 'los agentes'} ${agents}: ${doers.length === 1 ? 'lánzalo' : 'lánzalos'} con la herramienta Agent, con la tarea completa y la ruta del informe.`
+      : `Es una investigación: hazla tú, el Coordinador, ${research}.`
+    : doers.length > 0
+      ? `${doers.length === 1 ? 'Agente' : 'Agentes'}: ${agents}. ${doers.length === 1 ? 'Lánzalo' : 'Lánzalos'} ahora con la herramienta Agent, con la tarea completa.`
+      : `No nombra agente: elige tú a quién lanzar y, si es una funcionalidad nueva, sigue el recorrido «Nueva función» de la skill ${SKILL}. Si es una investigación, hazla tú, ${research}.`
   const crew = team.isChosen
     ? `Equipo activo de esta sesión: ${names(team.roles)}. Usa solo esos agentes; si hace falta otra especialidad, propónla sin lanzarla.`
     : ''
@@ -1073,13 +1119,17 @@ const handOff = async ($: EngineInterface, goal: string, team: SessionTeam, role
     `«${goal}»`,
     who,
     crew,
-    `En el prompt de cada agente que lances, pídele que publique sus avances con ${AVANCE} (una frase al empezar, en cada paso importante y antes de entregar) y que, si necesita algo de otro rol, se lo pregunte con ${CONSULTAR}. Si el encargo pide que un agente consulte a otro, que lo haga él con esa herramienta: no lances tú al otro. Cuenta tú cada paso del flujo con ${AVANCE}.`,
+    `En el prompt de cada agente que lances, pídele que publique sus avances con ${AVANCE} (una frase al empezar, en cada paso importante y antes de entregar) y que, si necesita algo de otro rol, se lo pregunte con ${CONSULTAR}. Si el encargo pide que un agente consulte a otro, que lo haga él con esa herramienta: no lances tú al otro. Cuenta tú cada paso del flujo y lo que investigas con ${AVANCE}.`,
+    `Las investigaciones son tuyas (ya no hay agente Investigación): antes de investigar, mira si docs/investigaciones/indice.md del proyecto ya tiene un informe vigente; al terminar, guarda el informe y actualiza el índice según «Investigaciones del proyecto» de la skill ${SKILL}, y compruébalo antes de dar el resultado. A los especialistas pásales la ruta de los informes que les sirvan.`,
     'Ejecútalo ya, sin pedirle que lo repita ni que cambie de chat. Al terminar, da un resumen corto del resultado: el panel se lo muestra.',
   ]
     .filter(Boolean)
     .join('\n\n')
-  const start =
-    doers.length > 0
+  const start = isMine
+    ? doers.length > 0
+      ? `Lo investigo yo y luego se lo encargo a ${names(doers)}`
+      : 'Me encargo yo de investigarlo'
+    : doers.length > 0
       ? `Se lo encargo a ${names(doers)}`
       : team.isChosen
         ? `Lo llevo al flujo con el equipo de esta sesión (${names(team.roles)})`
@@ -1100,7 +1150,7 @@ const deliver = async ($: EngineInterface, id: string, order: string) => {
     const now = (await read($, requests)).find(one => one.id === id)
     if (now !== undefined && statusOf(now) === 'recibido') {
       await setRequest($, id, one => ({ ...one, isSent: true as const, status: 'enviado' }))
-      await update($, driving, () => id)
+      await drive($, id)
     }
     return
   }
@@ -1122,6 +1172,15 @@ const commission = async ($: EngineInterface, channel: string, goal: string, rol
   const handed = await handOff($, goal, await teamOf($), roles, channel)
   await post($, channel, COORD, handed.text)
   if (handed.deliver) void handed.deliver()
+}
+
+// The main session takes a request on: it is what the Coordinador attends to.
+const drive = async ($: EngineInterface, id: string) => {
+  await update($, driving, () => id)
+  const goal = (await read($, requests)).find(one => one.id === id)?.goal
+  await update($, coordAtom, one =>
+    one.requestId === id ? one : { ...one, task: goal ?? one.task, requestId: id, tools: 0, activity: undefined, doing: undefined },
+  )
 }
 
 const setRequest = ($: EngineInterface, id: string, change: (one: PanelRequest) => PanelRequest) =>
@@ -1174,16 +1233,20 @@ const progress = async ($: EngineInterface, agentId: string | undefined, said: s
 const consult = async ($: EngineInterface, agentId: string | undefined, who: string, question: string) => {
   const asked = question.trim()
   const target = roleNamed(who.trim().replace(/^@/, '').toLowerCase())
-  const known = TEAM.map(one => one.aliases[0]).join(', ')
+  const known = [...TEAM.map(one => one.aliases[0]), 'coordinador'].join(', ')
   if (asked === '') return 'Falta la pregunta.'
   if (target === undefined) return `No conozco a «${who}». Puedes consultar a: ${known}.`
   const { role } = await whereOf($, agentId)
-  if (target === role) return 'No puedes consultarte a ti mismo.'
+  if (target === role) {
+    return role === COORD
+      ? 'Eres el Coordinador: las investigaciones las haces tú, con tus propias herramientas, sin consultar ni lanzar a nadie.'
+      : 'No puedes consultarte a ti mismo.'
+  }
   const team = await teamOf($)
   if (isOut(team, target)) {
     return `${labelOf(target)} no está en el equipo de esta sesión. Sigue sin su respuesta y dilo en tu informe; el usuario puede incorporarlo desde el panel.`
   }
-  const alias = TEAM.find(one => one.role === target)?.aliases[0] ?? target
+  const alias = TEAM.find(one => one.role === target)?.aliases[0] ?? (target === COORD ? 'coordinador' : target)
   const message: ChatMessage = { id: crypto.randomUUID(), channel: GROUP, from: role, text: `@${alias} ${asked}` }
   await update($, chat, all => [...all, message])
   await follow($, GROUP)
@@ -1301,7 +1364,7 @@ const gather = async (
       'Cómo respondes:',
       '- Reúne las aportaciones en una respuesta clara y natural, más corta que lo que te dieron: quédate con lo esencial, sin repetir ideas ni añadir lo que no dijeron, y ofrece el detalle si lo quiere. Nombra a un rol solo cuando ayude, por ejemplo para atribuir un riesgo o una decisión.',
       '- Si nadie aportó, contesta tú con lo que sabes, o pide la aclaración que falte.',
-      '- Si en realidad el usuario encarga un trabajo que hay que ejecutar, no lo contestes ni lo simules: di en una frase a quién se lo encargas y añade al final una línea «ENCARGO: @alias la tarea completa» (sin @alias si es una funcionalidad para todo el flujo). El panel la lanza en la sesión.',
+      '- Si en realidad el usuario encarga un trabajo que hay que ejecutar, no lo contestes ni lo simules: di en una frase a quién se lo encargas y añade al final una línea «ENCARGO: @alias la tarea completa» (@coordinador si es una investigación, que haces tú; sin @alias si es una funcionalidad para todo el flujo). El panel la lanza en la sesión.',
     ].join('\n'),
     VOICE,
     TRUTH,
@@ -1424,7 +1487,10 @@ const settle = async ($: EngineInterface, turnId: string, reason: string, answer
   const mine = list.filter(one => asked.runIds?.includes(one.id))
   if (mine.some(one => one.status === 'trabajando')) return
   const said = answer.trim()
-  const status: RequestStatus = reason !== 'answer' ? 'detenido' : mine.length === 0 ? 'sin-agentes' : 'terminado'
+  // Research the Coordinador did itself is work done, with no agent.
+  const isOwn = asked.roles?.includes(COORD) === true
+  const status: RequestStatus =
+    reason !== 'answer' ? 'detenido' : mine.length === 0 && !isOwn ? 'sin-agentes' : 'terminado'
   const text =
     status === 'detenido'
       ? 'La sesión principal se detuvo antes de terminar el encargo.'
@@ -1436,6 +1502,84 @@ const settle = async ($: EngineInterface, turnId: string, reason: string, answer
   await setRequest($, asked.id, one => ({ ...one, status }))
   await update($, driving, now => (now === asked.id ? null : now))
   await post($, asked.channel ?? GROUP, COORD, text)
+  // The Coordinador's result is its delivery, kept with the agents' ones.
+  if (status !== 'sin-agentes') {
+    const coord = await read($, coordAtom)
+    const delivery: AgentRun = {
+      id: `coordinador-${asked.id}`,
+      role: COORD,
+      task: asked.goal,
+      status: status === 'terminado' ? 'entregado' : 'interrumpido',
+      tools: coord.requestId === asked.id ? coord.tools : 0,
+      report: said || undefined,
+      startedAt: asked.at,
+      durationMs: Date.now() - asked.at,
+    }
+    await update($, runs, list => [...list.filter(one => one.id !== delivery.id), delivery].slice(-50))
+  }
+}
+
+// What the Coordinador, the main session, is doing, from what it really
+// does: in a turn or not, the tools it calls, and the agents still at work
+// for it. Research tools read as investigating, launching agents as
+// coordinating; a tool that says neither keeps what it was doing.
+const activityOf = (tool: string, input: Record<string, unknown>, was: CoordActivity | undefined, isResearch: boolean): CoordActivity => {
+  if (tool === 'WebSearch' || tool === 'WebFetch') return 'investigando'
+  if (tool === 'Agent' || tool === 'Task') return 'coordinando'
+  if ((tool === 'Write' || tool === 'Edit') && /investigaciones/.test(String(input.file_path ?? ''))) return 'investigando'
+  return was ?? (isResearch ? 'investigando' : 'trabajando')
+}
+
+const coordDoing = (tool: string, input: Record<string, unknown>) => {
+  if (tool === 'Agent' || tool === 'Task') {
+    const type = typeof input.subagent_type === 'string' ? input.subagent_type : ''
+    return type === '' ? 'lanza un agente' : `lanza a ${labelOf(roleOf(type))}`
+  }
+  const file = typeof input.file_path === 'string' ? input.file_path : ''
+  if ((tool === 'Write' || tool === 'Edit') && /investigaciones/.test(file)) {
+    return `guarda ${file.split('/').filter(Boolean).at(-1) ?? 'el informe'}`
+  }
+  return doingOf(tool, input)
+}
+
+const noteCoord = async ($: EngineInterface, tool: string, input: Record<string, unknown>) => {
+  const asked = await drivingOf($)
+  const isResearch = asked?.roles?.includes(COORD) === true
+  const before = await read($, coordAtom)
+  const activity = activityOf(tool, input, before.activity, isResearch)
+  const doing = coordDoing(tool, input)
+  const now = Date.now()
+  const isNoted = asked !== undefined && doing !== undefined && tool !== 'Agent' && tool !== 'Task' && (before.notedAt === undefined || now - before.notedAt >= NOTE_MS)
+  await update($, coordAtom, one => ({
+    ...one,
+    activity,
+    lastTool: tool,
+    doing: doing ?? one.doing,
+    tools: one.tools + 1,
+    ...(isNoted ? { notedAt: now } : {}),
+  }))
+  if (asked === undefined) return
+  const channel = asked.channel ?? GROUP
+  // Research asked in the panel has started for real: the person hears it there.
+  if (isResearch && activity === 'investigando' && statusOf(asked) === 'enviado') {
+    await setRequest($, asked.id, one => ({ ...one, status: 'iniciado' }))
+    await post($, channel, COORD, `Estoy investigando «${asked.goal}».`)
+  }
+  if (isNoted) {
+    await update($, chat, all => [...all, note(channel, `Coordinador ${doing}…`)])
+    await follow($, channel)
+  }
+}
+
+// The Coordinador's state for its card and the group chat's header.
+const coordNow = (coord: CoordState, list: AgentRun[]) => {
+  const waiting = [...new Set(list.filter(one => one.status === 'trabajando').map(one => one.role))]
+  if (coord.isBusy) {
+    const text =
+      coord.activity === 'investigando' ? 'Investigando' : coord.activity === 'coordinando' ? 'Coordinando' : coord.activity === 'trabajando' ? 'Trabajando' : 'Atendiendo'
+    return { text, isBusy: true, waiting }
+  }
+  return waiting.length > 0 ? { text: 'Esperando entregas', isBusy: true, waiting } : { text: 'Disponible', isBusy: false, waiting }
 }
 
 // What was kept under a merged role moves to the one it became, once: the
@@ -1454,7 +1598,36 @@ const mergeKeys = (choices: Record<string, string>) => {
   return out
 }
 
+// A retired role leaves the team and every choice to come; its chat and runs
+// stay, as history, and an agent of it at work finishes.
+const retire = async ($: EngineInterface) => {
+  const crew = await read($, crewAtom)
+  if ([...crew.roles, ...crew.leaving, ...Object.keys(crew.joined)].some(isRetired)) {
+    await update($, crewAtom, now => ({
+      ...now,
+      roles: now.roles.filter(role => !isRetired(role)),
+      leaving: now.leaving.filter(role => !isRetired(role)),
+      joined: Object.fromEntries(Object.entries(now.joined).filter(([role]) => !isRetired(role))),
+    }))
+  }
+  if ((await read($, paused)).some(isRetired)) await update($, paused, list => list.filter(role => !isRetired(role)))
+  const setting = await read($, setup)
+  if (setting !== null && [...setting.draft, ...(setting.busy ?? [])].some(isRetired)) {
+    await update($, setup, now =>
+      now === null ? now : { ...now, draft: now.draft.filter(role => !isRetired(role)), busy: now.busy?.filter(role => !isRetired(role)) },
+    )
+  }
+  const offered = await read($, offer)
+  if (offered !== null && offered.roles.some(isRetired)) {
+    await update($, offer, now => {
+      const roles = now?.roles.filter(role => !isRetired(role)) ?? []
+      return now === null || roles.length === 0 ? null : { ...now, roles }
+    })
+  }
+}
+
 const migrate = async ($: EngineInterface) => {
+  await retire($)
   const crew = await read($, crewAtom)
   if ([...crew.roles, ...crew.leaving, ...Object.keys(crew.joined)].some(isMerged)) {
     const joined: Record<string, number> = {}
@@ -1514,11 +1687,11 @@ export const register: Register = on => {
       .register({
         name: 'consultar',
         description:
-          'Panel de agentes: pregunta algo concreto a otro agente del equipo (producto, ux, backend, frontend, reviewer, qa, devops o research) en el chat de grupo, y recibe su respuesta. Solo cuando la necesites para seguir.',
+          'Panel de agentes: pregunta algo concreto a otro agente del equipo (producto, ux, backend, frontend, reviewer, qa, devops, o coordinador para algo que haya que investigar) en el chat de grupo, y recibe su respuesta. Solo cuando la necesites para seguir.',
         inputSchema: {
           type: 'object',
           properties: {
-            agente: { type: 'string', description: 'A quién: producto, ux, backend, frontend, reviewer, qa, devops o research' },
+            agente: { type: 'string', description: 'A quién: producto, ux, backend, frontend, reviewer, qa, devops o coordinador' },
             pregunta: { type: 'string', description: 'La pregunta, concreta' },
           },
           required: ['agente', 'pregunta'],
@@ -1551,6 +1724,13 @@ export const register: Register = on => {
 
   on('agent.spawn', async ($, e, next) => {
     const role = roleOf(e.subagentType)
+    // Investigación takes no new work: its research is the Coordinador's own.
+    // One already at work goes on to finish.
+    if (isRetired(role) && e.resume === undefined) {
+      return {
+        deny: `${labelOf(role)} ya no es un especialista del Agent Control Center: las investigaciones las haces tú, el Coordinador, con tus propias herramientas (WebSearch, WebFetch, Read), según «Investigación» de la skill ${SKILL}. No lances ningún subagente para investigar.`,
+      }
+    }
     const isMember = TEAM.some(one => one.role === role)
     const asked = e.resume === undefined ? await drivingOf($) : undefined
     if (isMember && isPaused(await read($, paused), role)) {
@@ -1634,6 +1814,8 @@ export const register: Register = on => {
         ),
       )
       await noteWork($, agentId, e.tool, e as unknown as Record<string, unknown>)
+    } else {
+      await noteCoord($, e.tool, e as unknown as Record<string, unknown>)
     }
 
     return next(e)
@@ -1648,9 +1830,13 @@ export const register: Register = on => {
     const asked = e.text.includes(FROM_PANEL) ? REQUEST_ID.exec(e.text)?.[1] : undefined
     if (asked !== undefined) {
       await setRequest($, asked, one => ({ ...one, isSent: true as const, status: statusOf(one) === 'recibido' ? 'enviado' : one.status }))
-      await update($, driving, () => asked)
+      await drive($, asked)
     } else if (e.origin.kind === 'composer') {
       await update($, driving, () => null)
+      // What the person asks the main session directly is what it attends to.
+      if (!e.isMeta && e.command === undefined && e.text.trim() !== '') {
+        await update($, coordAtom, one => ({ ...one, task: short(e.text.trim().replace(/\s+/g, ' '), 160), requestId: undefined, tools: 0, activity: undefined, doing: undefined }))
+      }
     }
     const team = await teamOf($)
     const signature = `${team.roles.join(',')}|${team.leaving.join(',')}`
@@ -1693,6 +1879,7 @@ export const register: Register = on => {
     if (e.agentId === undefined) {
       const asked = await drivingOf($)
       if (asked) await setRequest($, asked.id, one => ({ ...one, turnIds: [...(one.turnIds ?? []), e.turnId].slice(-20) }))
+      await update($, coordAtom, one => ({ ...one, isBusy: true, since: Date.now() }))
     }
 
     return next(e)
@@ -1701,6 +1888,7 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     const agentId = e.agentId
     if (agentId === undefined) {
+      await update($, coordAtom, one => ({ ...one, isBusy: false, doing: undefined, activity: undefined }))
       await settle($, e.turnId, e.reason, e.answer)
     } else {
       const status: RunStatus =
@@ -1866,8 +2054,14 @@ export const register: Register = on => {
 
       // Under the title: who is at work, or that the chat is free.
       const ownRun = working.find(one => one.role === showing)
-      const [dot, state] = isPaused(stopped, lead)
+      const isOld = isRetired(showing)
+      const coordState = coordNow(await read($, coordAtom), working)
+      const [dot, state] = isOld
+        ? [TONE.border, 'Ya no es especialista: el Coordinador hace las investigaciones']
+        : isPaused(stopped, lead)
         ? ['warning', isGroup ? 'Equipo en pausa' : 'En pausa']
+        : isGroup && coordState.isBusy && coordState.waiting.length === 0
+          ? [TONE.accent, `Coordinador: ${coordState.text.toLowerCase()}`]
         : isGroup && working.length > 0
           ? [TONE.accent, `${names([...new Set(working.map(one => one.role))])} trabajando`]
           : ownRun !== undefined
@@ -2027,7 +2221,7 @@ export const register: Register = on => {
               'bienvenida',
               lead,
               isGroup
-                ? '¡Hola! ¿Qué quieres que trabajemos hoy? Pregúntame «¿cómo va…?», pídeme una tarea nueva o nombra a un agente con @.'
+                ? '¡Hola! ¿Qué quieres que trabajemos hoy? Pregúntame «¿cómo va…?», pídeme una tarea o una investigación, o nombra a un agente con @.'
                 : `Escribe a ${labelOf(showing)} para empezar.`,
             )}
           {shownLines.map(one => {
@@ -2061,7 +2255,7 @@ export const register: Register = on => {
               {typing.join(', ')} {typing.length === 1 ? 'está' : 'están'} escribiendo…
             </Text>
           )}
-          {isQuiet && (
+          {isQuiet && !isOld && (
             <Box key="atajos" flexDirection="row" flexWrap="wrap" gap={1}>
               {isGroup
                 ? chip('atajo-pendiente', 'lista', '¿Qué está pendiente?', () => send($, GROUP, '¿Qué está pendiente?'))
@@ -2110,7 +2304,19 @@ export const register: Register = on => {
               </Box>
             </Box>
           )}
-          {Input ? (
+          {isOld ? (
+            <Box key="historial" flexDirection="column" gap={1}>
+              <Text dimColor>
+                Este es el historial de {labelOf(showing)}. Ya no es un especialista: las investigaciones las hace el Coordinador. Pídeselas en el Chat de grupo.
+              </Text>
+              <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
+                {back('volver-abajo')}
+                <Button key="ir-al-grupo" plain onPress={() => openChat($, GROUP)}>
+                  <Text color={TONE.accent}>Ir al Chat de grupo ↗</Text>
+                </Button>
+              </Box>
+            </Box>
+          ) : Input ? (
             // The field takes the pane's whole width, two lines tall, with room
             // below so its focus ring is not cut off. Its key moves on with each
             // message the person sends, so it starts empty, and stays put while
@@ -2175,7 +2381,7 @@ export const register: Register = on => {
             </Text>
           </Box>
           <Text dimColor>
-            Elige qué agentes participan en esta sesión. Los que dejes fuera conservan su historial, sus chats y sus entregas.
+            Elige qué especialistas participan en esta sesión. Los que dejes fuera conservan su historial, sus chats y sus entregas. El Coordinador participa siempre: dirige al equipo y hace las investigaciones.
           </Text>
           {TEAM.map(member => {
             const isOn = draft.includes(member.role)
@@ -2210,7 +2416,7 @@ export const register: Register = on => {
             )
           })}
           <Text dimColor size="caption">
-            {draft.length} de {TEAM.length} seleccionados
+            {draft.length} de {TEAM.length} especialistas seleccionados
           </Text>
           {busy.length > 0 ? (
             <Box key="ocupados" flexDirection="column" gap={1} borderStyle="round" borderColor="warning" paddingX={1}>
@@ -2405,41 +2611,83 @@ export const register: Register = on => {
       )
     })
 
-    // The Coordinador: the main session, and the last work handed to it.
-    const asked = (await read($, requests)).at(-1)
+    // The Coordinador: the main session itself, the team's lead, apart from
+    // the specialists chosen under «Configurar equipo». Its state comes from
+    // what the session really does; its chat is the group's, and its
+    // deliveries, its results, are kept with the agents' ones.
+    const delivered = list.filter(one => one.status !== 'trabajando').reverse()
+    const chats = await read($, chat)
+    const coord = await read($, coordAtom)
+    const coordState = coordNow(coord, list)
+    const coordDelivered = list.filter(one => one.role === COORD && one.status !== 'trabajando')
+    const lastOwn = coordDelivered.at(-1)
+    const oldChats = RETIRED.filter(role => chats.some(one => one.channel === role && !one.isNote))
+    const coordLine = coord.isBusy
+      ? [coord.task ? `«${short(coord.task, 90)}»` : '', coord.doing ?? ''].filter(Boolean).join(' · ') || 'Atiende la sesión principal.'
+      : coordState.waiting.length > 0
+        ? `Espera a ${names(coordState.waiting)}${coord.task ? ` · «${short(coord.task, 70)}»` : ''}`
+        : coord.task
+          ? `Último: «${short(coord.task, 90)}»`
+          : 'Dirige al equipo, recibe los mensajes del grupo que no nombran a nadie y hace las investigaciones.'
     const coordinator = (
       <Box
         key="tarjeta-coordinador"
         flexDirection="column"
         gap={1}
         borderStyle="round"
-        borderColor={TONE.border}
-        backgroundColor={fill(TONE.card)}
-        hover={{ borderColor: TONE.hover }}
+        borderColor={coordState.isBusy ? TONE.workingBorder : TONE.accent}
+        backgroundColor={fill(coordState.isBusy ? TONE.workingCard : TONE.card)}
+        hover={{ borderColor: coordState.isBusy ? 'warning' : TONE.hover }}
         paddingX={1}
         paddingY={1}
       >
         <Box flexDirection="row" gap={1} alignItems="center">
           {tile(COORD, 16)}
-          <Text bold>Coordinador</Text>
-          <Text dimColor size="caption">
-            sesión principal
+          <Box flexShrink={1} minWidth={0}>
+            <Text bold wrap="truncate-end">
+              Coordinador · Agente principal
+            </Text>
+          </Box>
+        </Box>
+        <Box flexDirection="row" justifyContent="space-between" gap={1} paddingLeft={5}>
+          <Text color={coordState.isBusy ? 'warning' : undefined} dimColor={!coordState.isBusy} wrap="truncate-end">
+            <Text color={coordState.isBusy ? 'warning' : TONE.available}>●</Text> {coordState.text}
           </Text>
+          {coord.isBusy && coord.tools > 0 && <Text dimColor>{coord.tools} herramientas</Text>}
         </Box>
         <Box paddingLeft={5}>
           <Text dimColor size="caption" wrap="truncate-end">
-            {asked
-              ? `Último encargo: «${asked.goal}» · ${REQUEST_CHIP[statusOf(asked)]}`
-              : 'Recibe los mensajes del grupo que no nombran a nadie.'}
+            {coordLine}
           </Text>
         </Box>
-        <Button key="chat-coordinador" plain onPress={() => openChat($, GROUP)}>
-          <Text dimColor>Hablar con el Coordinador ↗</Text>
-        </Button>
+        <Box flexDirection="row" flexWrap="wrap" justifyContent="space-between" alignItems="center" gap={1}>
+          <Button key="chat-coordinador" plain onPress={() => openChat($, GROUP)}>
+            <Text dimColor>Abrir chat ↗</Text>
+          </Button>
+          <Box flexDirection="row" flexWrap="wrap" gap={2}>
+            {oldChats.map(role => (
+              <Button key={`historial-${role}`} plain onPress={() => openChat($, role)}>
+                <Text dimColor>Chat anterior de {labelOf(role)}</Text>
+              </Button>
+            ))}
+            {lastOwn !== undefined && (
+              <Button
+                key="entrega-coordinador"
+                plain
+                onPress={async () => {
+                  const at = delivered.findIndex(one => one.id === lastOwn.id)
+                  if (at >= 3) await update($, showAll, () => true)
+                  await update($, expanded, () => lastOwn.id)
+                }}
+              >
+                <Text color={TONE.accent}>Última entrega ({coordDelivered.length})</Text>
+              </Button>
+            )}
+          </Box>
+        </Box>
       </Box>
     )
 
-    const delivered = list.filter(one => one.status !== 'trabajando').reverse()
     const recent = isAll ? delivered : delivered.slice(0, 3)
 
     const tabs: { id: TeamFilter; label: string; count: number }[] = [
@@ -2471,8 +2719,8 @@ export const register: Register = on => {
         </Box>
         <Text dimColor size="caption">
           {team.isChosen
-            ? `Equipo de esta sesión: ${team.roles.length} de ${TEAM.length} agentes`
-            : `Equipo de esta sesión: los ${TEAM.length} agentes (sin configurar)`}
+            ? `Equipo de esta sesión: el Coordinador y ${team.roles.length} de ${TEAM.length} especialistas`
+            : `Equipo de esta sesión: el Coordinador y los ${TEAM.length} especialistas (sin configurar)`}
         </Text>
 
         <Box flexDirection="row" flexWrap="wrap" justifyContent="space-between" alignItems="center" gap={1}>
@@ -2511,8 +2759,8 @@ export const register: Register = on => {
 
         {isEmpty ? (
           <Box key="equipo-vacio" flexDirection="column" gap={1} borderStyle="round" borderColor={TONE.border} paddingX={1} paddingY={1}>
-            <Text>No hay agentes en el equipo de esta sesión.</Text>
-            <Text dimColor>El Coordinador no podrá consultar a nadie, ni Claude lanzar agentes, hasta que elijas alguno.</Text>
+            <Text>No hay especialistas en el equipo de esta sesión.</Text>
+            <Text dimColor>El Coordinador sigue disponible y puede investigar, pero no podrá consultar ni lanzar a nadie hasta que elijas algún especialista.</Text>
             <Button key="configurar-equipo-vacio" variant="primary" onPress={configure}>
               Configurar equipo
             </Button>

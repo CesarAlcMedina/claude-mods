@@ -1,1 +1,1 @@
-{ "name": "agent-control-center", "version": "0.8.0", "description": "Ocho subagentes (Producto y negocio, UX/UI, Backend, Frontend, Reviewer, QA, DevOps, Research) y la skill coordinador que los orquesta", "license": "MIT", "author": { "name": "Eres" } }
+{ "name": "agent-control-center", "version": "0.10.0", "description": "Siete especialistas (Producto y negocio, UX/UI, Backend, Frontend, Reviewer, QA, DevOps) y la skill coordinador: el Coordinador dirige al equipo y hace las investigaciones", "license": "MIT", "author": { "name": "Eres" } }

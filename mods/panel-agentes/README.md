@@ -25,3 +25,5 @@ El trabajo de verdad (leer y cambiar archivos, buscar en la web) lo hacen los ag
 Necesita el plugin `agent-control-center`. Se ve en una sesión de código (pestaña Code de la app o terminal), no en la vista de Proyectos.
 
 **Producto y negocio** reúne en una sola tarjeta y un solo chat lo que antes eran Product Owner y Analista de negocio. `@po`, `@ba` y `@analista` siguen funcionando y llegan a él una sola vez aunque uses varios en el mismo mensaje. Al abrir una sesión con esta versión, el panel pasa a Producto y negocio lo que tenía guardado de los dos: su sitio en el equipo, los chats (cada mensaje conserva quién lo escribió), las entregas, el modelo y el esfuerzo elegidos (si eran distintos, gana el del Product Owner) y el trabajo en curso, que sigue sin interrumpirse.
+
+**Investigaciones**: cuando un encargo del panel pasa por Investigación, la sesión principal mira antes `docs/investigaciones/indice.md` del proyecto por si ya hay un informe vigente, y al terminar guarda el informe y actualiza el índice (lo explica el README de `agent-control-center`).
