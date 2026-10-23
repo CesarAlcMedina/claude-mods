@@ -142,6 +142,10 @@ declare module 'claude-code' {
       usage: PlanUsage | null
       /** Moves on a timer, to keep the countdown current. */
       tick: number
+      /** A chat shows the whole session limit under its «Sesión» chip. */
+      limitOpen: boolean
+      /** Text a chat's field starts with, such as «Nueva tarea: ». */
+      draft: { channel: string; text: string } | null
     }
   }
 }
