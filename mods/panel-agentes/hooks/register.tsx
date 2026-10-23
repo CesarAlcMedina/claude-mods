@@ -1146,7 +1146,7 @@ const deliver = async ($: EngineInterface, id: string, order: string) => {
     () => false,
   )
   if (isSent) {
-    // Where the panel's own prompt.submit hook did not see it enter.
+    // Where no turn of it was seen to start yet.
     const now = (await read($, requests)).find(one => one.id === id)
     if (now !== undefined && statusOf(now) === 'recibido') {
       await setRequest($, id, one => ({ ...one, isSent: true as const, status: 'enviado' }))
@@ -1174,13 +1174,27 @@ const commission = async ($: EngineInterface, channel: string, goal: string, rol
   if (handed.deliver) void handed.deliver()
 }
 
+// A request without the @names it was addressed with, as the Coordinador
+// tells it.
+const bare = (goal: string) => goal.replace(/^(\s*@[^\s,:]+[,:]?)+\s*/, '') || goal
+
 // The main session takes a request on: it is what the Coordinador attends to.
 const drive = async ($: EngineInterface, id: string) => {
   await update($, driving, () => id)
-  const goal = (await read($, requests)).find(one => one.id === id)?.goal
+  const found = (await read($, requests)).find(one => one.id === id)?.goal
+  const goal = found === undefined ? undefined : bare(found)
   await update($, coordAtom, one =>
     one.requestId === id ? one : { ...one, task: goal ?? one.task, requestId: id, tools: 0, activity: undefined, doing: undefined },
   )
+}
+
+// The request a prompt of the panel's own carries, and the main session
+// taking it on.
+const ownRequest = (text: string) => (text.includes(FROM_PANEL) ? REQUEST_ID.exec(text)?.[1] : undefined)
+
+const takeOn = async ($: EngineInterface, id: string) => {
+  await setRequest($, id, one => ({ ...one, isSent: true as const, status: statusOf(one) === 'recibido' ? 'enviado' : one.status }))
+  await drive($, id)
 }
 
 const setRequest = ($: EngineInterface, id: string, change: (one: PanelRequest) => PanelRequest) =>
@@ -1223,7 +1237,9 @@ const progress = async ($: EngineInterface, agentId: string | undefined, said: s
   const text = said.trim()
   if (text === '') return 'Falta el texto del avance.'
   const { role, channel } = await whereOf($, agentId)
-  await post($, channel, role, short(text, PROGRESS_CHARS))
+  // The line already goes under its name.
+  const line = text.replace(new RegExp(`^${labelOf(role)}\\s*:\\s*`, 'i'), '') || text
+  await post($, channel, role, short(line, PROGRESS_CHARS))
   return 'Publicado en el panel.'
 }
 
@@ -1563,7 +1579,7 @@ const noteCoord = async ($: EngineInterface, tool: string, input: Record<string,
   // Research asked in the panel has started for real: the person hears it there.
   if (isResearch && activity === 'investigando' && statusOf(asked) === 'enviado') {
     await setRequest($, asked.id, one => ({ ...one, status: 'iniciado' }))
-    await post($, channel, COORD, `Estoy investigando «${asked.goal}».`)
+    await post($, channel, COORD, `Estoy investigando «${bare(asked.goal)}».`)
   }
   if (isNoted) {
     await update($, chat, all => [...all, note(channel, `Coordinador ${doing}…`)])
@@ -1827,10 +1843,9 @@ export const register: Register = on => {
   // agent's hand-back keeps it going. The main session hears of the team
   // when it changes, with the next prompt.
   on('prompt.submit', async ($, e, next) => {
-    const asked = e.text.includes(FROM_PANEL) ? REQUEST_ID.exec(e.text)?.[1] : undefined
+    const asked = ownRequest(e.text)
     if (asked !== undefined) {
-      await setRequest($, asked, one => ({ ...one, isSent: true as const, status: statusOf(one) === 'recibido' ? 'enviado' : one.status }))
-      await drive($, asked)
+      await takeOn($, asked)
     } else if (e.origin.kind === 'composer') {
       await update($, driving, () => null)
       // What the person asks the main session directly is what it attends to.
@@ -1877,6 +1892,11 @@ export const register: Register = on => {
 
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
+      // The panel's own prompt reaches none of its prompt.submit hooks, and
+      // its submit settles once the turn is under way: the turn's text says
+      // which request it is.
+      const own = ownRequest(e.text)
+      if (own !== undefined) await takeOn($, own)
       const asked = await drivingOf($)
       if (asked) await setRequest($, asked.id, one => ({ ...one, turnIds: [...(one.turnIds ?? []), e.turnId].slice(-20) }))
       await update($, coordAtom, one => ({ ...one, isBusy: true, since: Date.now() }))
