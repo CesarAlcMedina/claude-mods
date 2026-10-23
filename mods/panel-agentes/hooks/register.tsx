@@ -1074,6 +1074,7 @@ const handOff = async ($: EngineInterface, goal: string, team: SessionTeam, role
     who,
     crew,
     `En el prompt de cada agente que lances, pídele que publique sus avances con ${AVANCE} (una frase al empezar, en cada paso importante y antes de entregar) y que, si necesita algo de otro rol, se lo pregunte con ${CONSULTAR}. Si el encargo pide que un agente consulte a otro, que lo haga él con esa herramienta: no lances tú al otro. Cuenta tú cada paso del flujo con ${AVANCE}.`,
+    `Antes de lanzar a Investigación, mira si docs/investigaciones/indice.md del proyecto ya tiene un informe vigente; a los demás agentes pásales la ruta de los informes que les sirvan. Cuando Investigación entregue, guarda el informe y actualiza el índice según «Investigaciones del proyecto» de la skill ${SKILL}, y compruébalo antes de dar el resultado.`,
     'Ejecútalo ya, sin pedirle que lo repita ni que cambie de chat. Al terminar, da un resumen corto del resultado: el panel se lo muestra.',
   ]
     .filter(Boolean)

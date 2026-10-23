@@ -1,1 +1,1 @@
-{"name": "panel-agentes", "version": "0.17.0", "description": "Panel junto al chat que muestra qué agente del Agent Control Center está trabajando y qué entregó cada uno", "license": "MIT", "author": {"name": "Eres"}, "types": "./types/index.d.ts"}
+{"name": "panel-agentes", "version": "0.18.0", "description": "Panel junto al chat que muestra qué agente del Agent Control Center está trabajando y qué entregó cada uno", "license": "MIT", "author": {"name": "Eres"}, "types": "./types/index.d.ts"}

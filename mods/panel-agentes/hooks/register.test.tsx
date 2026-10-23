@@ -1186,6 +1186,9 @@ test('los agentes publican avances y se consultan entre ellos en el chat', async
   // The order asks for progress and for consulting with the panel's tools.
   expect(submits[0]).toContain('pídele que publique sus avances con mcp__panel-agentes__avance')
   expect(submits[0]).toContain('que lo haga él con esa herramienta: no lances tú al otro')
+  // Research is checked first, then saved and indexed in the project.
+  expect(submits[0]).toContain('mira si docs/investigaciones/indice.md del proyecto ya tiene un informe vigente')
+  expect(submits[0]).toContain('guarda el informe y actualiza el índice según «Investigaciones del proyecto»')
   await $.turn.start({ text: '', turnId: 'm1' })
   // The Coordinador tells each step of the flow.
   expect(await tool({ tool: 'mcp__panel-agentes__avance', texto: 'Lanzo a Investigación para ver los navegadores.' })).toMatchObject({ result: 'Publicado en el panel.' })

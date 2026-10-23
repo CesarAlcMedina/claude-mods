@@ -68,7 +68,44 @@ Cuando el usuario pregunte cómo va una tarea:
 - Si uno dice que necesita algo del otro, pásaselo tú con lo que pidió; ninguno toca la capa del otro.
 
 ## Traspaso de contexto
-Los subagentes no ven la conversación. En cada invocación incluye: objetivo, entregables previos relevantes (resumidos, no completos si son largos), archivos implicados, y qué se espera de vuelta.
+Los subagentes no ven la conversación. En cada invocación incluye: objetivo, entregables previos relevantes (resumidos, no completos si son largos), archivos implicados, los informes de investigación que vengan al caso (ruta y lo pertinente en una o dos frases) y qué se espera de vuelta.
+
+## Investigaciones del proyecto
+Los informes de research-agent se conservan en el propio proyecto para que todo el equipo los reutilice. Investigación busca y te entrega el informe; tú lo guardas y llevas el índice. Investigación no escribe archivos ni necesita más permisos.
+
+**Dónde.** En `docs/investigaciones/` de la raíz del proyecto de esta sesión, con un `indice.md`. Si el proyecto ya tiene una carpeta equivalente para investigaciones (por ejemplo `docs/research/`), úsala en su lugar con su índice. Cada proyecto guarda solo sus informes: no copies ni enlaces informes de otros proyectos.
+
+**Antes de lanzar a research-agent.** Lee el `indice.md`, si existe, y busca un informe vigente sobre el mismo tema.
+- Si hay uno completo que responde a lo que se pide y su tema no cambia con el tiempo, úsalo sin repetir la investigación y dilo.
+- Si el último quedó parcial o bloqueado, lanza a research-agent con su ruta para completar lo pendiente.
+- Si la información puede haber cambiado (versiones, precios, APIs, estado de un proyecto, normativa) o la pregunta va más allá, lanza a research-agent con la ruta del informe anterior para que parta de él y compruebe de nuevo lo que haga falta. La fecha de guardado no demuestra que las fuentes sigan vigentes.
+
+**Al recibir la entrega**, guárdala siempre y sin preguntar, también si viene parcial o bloqueada: una entrega con datos sin verificar se guarda igual, porque el informe ya los marca como tales y su estado dice qué falta.
+1. Guárdala en `docs/investigaciones/AAAA-MM-DD-tema-breve.md` (fecha de hoy y tema en minúsculas con guiones). Si ese nombre ya existe, añade `-v2`, `-v3`… Nunca sobrescribas ni borres un informe. El archivo lleva esta cabecera y, debajo, la entrega completa de research-agent tal cual, sin resumirla:
+   ```
+   # <Tema>
+   - Fecha: AAAA-MM-DD
+   - Estado: completa | parcial | bloqueada (qué falta)
+   - Pregunta: <la pregunta encargada>
+   - Encargado por: <usuario o etapa del flujo> · Investigó: research-agent
+   - Sustituye a: <enlace al informe anterior, o «—»>
+   - Decisiones del usuario: <lo que el usuario aceptó de forma explícita, o «ninguna todavía»>
+
+   > Hallazgos y recomendaciones de una investigación: no son requisitos ni decisiones, salvo lo que figure en «Decisiones del usuario».
+   ```
+2. Actualiza `indice.md` (créalo si no existe) con una fila por informe, más reciente arriba:
+   ```
+   # Investigaciones del proyecto
+   | Tema | Fecha | Estado | Vigente | Informe | Notas |
+   |---|---|---|---|---|---|
+   ```
+   En Estado pon «completa», o «parcial» o «bloqueada» con lo que falta en pocas palabras. El nuevo va con «sí» en Vigente. Si actualiza a otro, deja la fila anterior y cambia su Vigente a «no, sustituida por [nuevo](archivo)»; añade también esa línea al principio del informe anterior, sin tocar el resto.
+3. Comprueba con Read que el informe existe y contiene la entrega (la respuesta corta y las fuentes) y que el índice tiene su fila. Solo entonces di «Guardado en `<ruta>`».
+4. Si no puedes guardar (permiso denegado, carpeta de solo lectura, sin proyecto) o la comprobación falla, di el motivo en una frase, no digas que quedó archivado y deja el informe completo en tu respuesta para que no se pierda.
+
+**Decisiones.** Cuando el usuario acepte de forma explícita una recomendación, anótala en «Decisiones del usuario» del informe y en las Notas del índice. Guardar un informe no convierte sus recomendaciones en requisitos.
+
+**Al asignar trabajo.** Pasa a cada agente solo los informes que le sirven: la ruta y lo pertinente en una o dos frases, no todos los informes ni su contenido entero. Los agentes leen el archivo cuando necesitan el detalle.
 
 ## Puertas de validación (antes de avanzar)
 - product-analyst → UX/ingenieros/QA: hay objetivo y alcance (con lo que queda fuera) y criterios Given/When/Then verificables para cada historia o cambio, con los requisitos y reglas que haga falta; no quedan ambigüedades bloqueantes sin una suposición aceptada. La profundidad va según el encargo: a un cambio pequeño le bastan sus criterios.
