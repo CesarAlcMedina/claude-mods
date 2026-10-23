@@ -37,8 +37,7 @@ const draft = atom({ plugin: 'panel-agentes', key: 'draft' } as const, null)
 // The team in the order the coordinador skill hands work along, with the
 // short names an @mention in the group chat may use.
 const TEAM: { role: string; label: string; aliases: string[]; job: string }[] = [
-  { role: 'product-owner', label: 'Product Owner', aliases: ['po'], job: 'objetivos, valor de negocio, épicas, historias de usuario y prioridades' },
-  { role: 'business-analyst', label: 'Analista de negocio', aliases: ['ba', 'analista'], job: 'requisitos funcionales y no funcionales, reglas de negocio y criterios de aceptación' },
+  { role: 'product-analyst', label: 'Producto y negocio', aliases: ['producto', 'po', 'ba', 'analista', 'negocio'], job: 'el problema, el usuario y el valor, alcance, prioridades e historias, requisitos, reglas de negocio y criterios de aceptación verificables' },
   { role: 'ux-ui-designer', label: 'Diseño UX/UI', aliases: ['ux', 'ui', 'diseño'], job: 'flujos, wireframes, estados de los componentes y accesibilidad' },
   { role: 'backend-engineer', label: 'Backend', aliases: ['backend', 'back', 'dev'], job: 'APIs, lógica de negocio, datos e integraciones del lado del servidor, con pruebas unitarias' },
   { role: 'frontend-engineer', label: 'Frontend', aliases: ['frontend', 'front', 'dev'], job: 'componentes, pantallas, estilos, accesibilidad y consumo de APIs, con pruebas unitarias' },
@@ -48,11 +47,21 @@ const TEAM: { role: string; label: string; aliases: string[]; job: string }[] = 
   { role: 'research-agent', label: 'Investigación', aliases: ['research', 'investigacion', 'investigación'], job: 'investigar tecnologías, documentación y buenas prácticas, con fuentes' },
 ]
 
+// Roles merged into another: Product Owner and Analista de negocio are now
+// one, Producto y negocio. What was kept under them goes to it, and an agent
+// of theirs still at work counts as it.
+const MERGED: Record<string, string> = { 'product-owner': 'product-analyst', 'business-analyst': 'product-analyst' }
+const merged = (role: string) => MERGED[role] ?? role
+
 const roleOf = (subagentType: string) =>
-  subagentType.startsWith(PREFIX) ? subagentType.slice(PREFIX.length) : subagentType
+  merged(subagentType.startsWith(PREFIX) ? subagentType.slice(PREFIX.length) : subagentType)
 
 // Roles the team no longer has, still named in runs and chats kept from before.
-const FORMER: Record<string, string> = { 'software-engineer': 'Ingeniería' }
+const FORMER: Record<string, string> = {
+  'software-engineer': 'Ingeniería',
+  'product-owner': 'Product Owner',
+  'business-analyst': 'Analista de negocio',
+}
 
 // The Coordinador is the main session itself, running agent-control-center's
 // coordinador skill: a subagent cannot launch others, and auto mode refuses
@@ -447,6 +456,7 @@ const TONE = {
 // Each speaker's round mark in a chat: its initials on its own color.
 const AVATARS: Record<string, [string, string]> = {
   coordinador: ['C', '#8b7cf6'],
+  'product-analyst': ['PN', '#d9912b'],
   'product-owner': ['PO', '#d9912b'],
   'business-analyst': ['BA', '#2b8fd9'],
   'ux-ui-designer': ['UX', '#d9548f'],
@@ -483,6 +493,7 @@ const summaryOf = (report?: string) => {
 
 // Line icons, drawn in the surface's pictures where it has them.
 const ICONS: Record<string, string> = {
+  'product-analyst': '<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V3h6v1M9 10h6M9 14h6M9 18h3"/>',
   'product-owner': '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6 8-6s8 2 8 6"/>',
   'business-analyst': '<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2M3 13h18M11 13v2h2v-2"/>',
   'ux-ui-designer': '<path d="M16 3l5 5L8 21H3v-5z"/><path d="M13 6l5 5"/>',
@@ -501,6 +512,7 @@ const ICONS: Record<string, string> = {
 }
 const GLYPHS: Record<string, string> = {
   coordinador: '🧭',
+  'product-analyst': '📋',
   'product-owner': '👤',
   'business-analyst': '💼',
   'ux-ui-designer': '✏️',
@@ -603,7 +615,7 @@ const kindOf = (text: string): Kind => {
 
 // What the message is, and whom the Coordinador consults. A clear "no one"
 // stands, unless the person asked something; a pick that fails or names no
-// one usable still leaves one role to consult, the Product Owner, asked to
+// one usable still leaves one role to consult, Producto y negocio, asked to
 // answer or to ask what is missing.
 //
 // Only the session's team is picked from. A specialty the message needs and
@@ -658,7 +670,7 @@ const pick = async ($: EngineInterface, history: ChatMessage[], text: string, cr
   if (kind !== 'otro' || turns.length > 0 || missing.length > 0) return { kind, turns, missing }
   const isNobody = said.replace(/[\s.*_]/g, '').toUpperCase() === NOBODY
   if (isNobody && !isQuestion(text)) return { kind, turns: [], missing }
-  const fallback = crew.roles.includes('product-owner') ? 'product-owner' : crew.roles[0]
+  const fallback = crew.roles.includes('product-analyst') ? 'product-analyst' : crew.roles[0]
   if (fallback === undefined) return { kind, turns: [], missing, isAlone: true }
   return {
     kind,
@@ -1426,8 +1438,61 @@ const settle = async ($: EngineInterface, turnId: string, reason: string, answer
   await post($, asked.channel ?? GROUP, COORD, text)
 }
 
+// What was kept under a merged role moves to the one it became, once: the
+// team, pauses and choices, its chats (each message keeps who wrote it) and
+// its runs, those at work included, which go on as the new role's.
+const mergedAll = (roles: string[]) => [...new Set(roles.map(merged))]
+const isMerged = (role: string) => MERGED[role] !== undefined
+// A choice kept for a merged role goes to the new one, unless it has its own;
+// the first merged role's wins.
+const mergeKeys = (choices: Record<string, string>) => {
+  const out = Object.fromEntries(Object.entries(choices).filter(([role]) => !isMerged(role)))
+  for (const [role, to] of Object.entries(MERGED)) {
+    const value = choices[role]
+    if (value !== undefined && out[to] === undefined) out[to] = value
+  }
+  return out
+}
+
+const migrate = async ($: EngineInterface) => {
+  const crew = await read($, crewAtom)
+  if ([...crew.roles, ...crew.leaving, ...Object.keys(crew.joined)].some(isMerged)) {
+    const joined: Record<string, number> = {}
+    for (const [role, at] of Object.entries(crew.joined)) joined[merged(role)] = Math.min(at, joined[merged(role)] ?? at)
+    const roles = mergedAll(crew.roles)
+    await update($, crewAtom, () => ({
+      ...crew,
+      roles,
+      leaving: mergedAll(crew.leaving).filter(role => !roles.includes(role)),
+      joined,
+    }))
+  }
+  if ((await read($, paused)).some(isMerged)) await update($, paused, list => mergedAll(list))
+  if ((await read($, chat)).some(one => isMerged(one.channel))) {
+    await update($, chat, list => list.map(one => (isMerged(one.channel) ? { ...one, channel: merged(one.channel) } : one)))
+  }
+  if ((await read($, runs)).some(one => isMerged(one.role))) {
+    await update($, runs, list => list.map(one => (isMerged(one.role) ? { ...one, role: merged(one.role) } : one)))
+  }
+  if ((await read($, requests)).some(one => one.roles?.some(isMerged))) {
+    await update($, requests, list => list.map(one => (one.roles?.some(isMerged) ? { ...one, roles: mergedAll(one.roles) } : one)))
+  }
+  if (isMerged(await read($, view))) await update($, view, now => merged(now))
+  const setting = await read($, setup)
+  if (setting !== null && [...setting.draft, ...(setting.busy ?? [])].some(isMerged)) {
+    await update($, setup, now => (now === null ? now : { ...now, draft: mergedAll(now.draft), busy: now.busy && mergedAll(now.busy) }))
+  }
+  const offered = await read($, offer)
+  if (offered !== null && offered.roles.some(isMerged)) await update($, offer, now => (now === null ? now : { ...now, roles: mergedAll(now.roles) }))
+  for (const key of [MODELS_KEY, EFFORTS_KEY]) {
+    const choices = await readChoices($, key)
+    if (Object.keys(choices).some(isMerged)) await $.store.set(key, mergeKeys(choices))
+  }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
+    await migrate($)
     const kept = await readModels($)
     await update($, modelsShown, () => kept)
     const keptEfforts = await readChoices($, EFFORTS_KEY)
@@ -1449,11 +1514,11 @@ export const register: Register = on => {
       .register({
         name: 'consultar',
         description:
-          'Panel de agentes: pregunta algo concreto a otro agente del equipo (po, ba, ux, backend, frontend, reviewer, qa, devops o research) en el chat de grupo, y recibe su respuesta. Solo cuando la necesites para seguir.',
+          'Panel de agentes: pregunta algo concreto a otro agente del equipo (producto, ux, backend, frontend, reviewer, qa, devops o research) en el chat de grupo, y recibe su respuesta. Solo cuando la necesites para seguir.',
         inputSchema: {
           type: 'object',
           properties: {
-            agente: { type: 'string', description: 'A quién: po, ba, ux, backend, frontend, reviewer, qa, devops o research' },
+            agente: { type: 'string', description: 'A quién: producto, ux, backend, frontend, reviewer, qa, devops o research' },
             pregunta: { type: 'string', description: 'La pregunta, concreta' },
           },
           required: ['agente', 'pregunta'],
@@ -1590,7 +1655,8 @@ export const register: Register = on => {
     const team = await teamOf($)
     const signature = `${team.roles.join(',')}|${team.leaving.join(',')}`
     if (!team.isChosen || team.told === signature) return next(e)
-    const was = team.told?.split('|')[0]?.split(',').filter(Boolean)
+    // A role told under an old name is no newcomer under its new one.
+    const was = team.told?.split('|')[0]?.split(',').filter(Boolean).map(merged)
     const newcomers = was === undefined ? [] : team.roles.filter(role => !was.includes(role))
     const line = [
       `Equipo activo de esta sesión, elegido por el usuario en el panel de agentes: ${team.roles.length > 0 ? names(team.roles) : 'ninguno'}.`,
