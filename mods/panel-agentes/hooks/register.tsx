@@ -31,6 +31,8 @@ const setup = atom({ plugin: 'panel-agentes', key: 'setup' } as const, null)
 const offer = atom({ plugin: 'panel-agentes', key: 'offer' } as const, null)
 const planUsage = atom({ plugin: 'panel-agentes', key: 'usage' } as const, null)
 const tick = atom({ plugin: 'panel-agentes', key: 'tick' } as const, 0)
+const limitOpen = atom({ plugin: 'panel-agentes', key: 'limitOpen' } as const, false)
+const draft = atom({ plugin: 'panel-agentes', key: 'draft' } as const, null)
 
 // The team in the order the coordinador skill hands work along, with the
 // short names an @mention in the group chat may use.
@@ -434,7 +436,29 @@ const TONE = {
   doneTile: '#1f3a2b',
   tabOn: '#2d2a40',
   accent: '#b4a5ff',
+  /** The person's own bubble in a chat, and the text on it. */
+  mine: '#c9bdff',
+  mineText: '#1b1530',
+  /** The tile at the head of the group's chat. */
+  headTile: '#3a3270',
+  available: '#3ecf6e',
 }
+
+// Each speaker's round mark in a chat: its initials on its own color.
+const AVATARS: Record<string, [string, string]> = {
+  coordinador: ['C', '#8b7cf6'],
+  'product-owner': ['PO', '#d9912b'],
+  'business-analyst': ['BA', '#2b8fd9'],
+  'ux-ui-designer': ['UX', '#d9548f'],
+  'backend-engineer': ['BE', '#2fa877'],
+  'frontend-engineer': ['FE', '#4f74e0'],
+  'code-reviewer': ['CR', '#9b5de0'],
+  'qa-engineer': ['QA', '#d95454'],
+  'devops-engineer': ['DO', '#2aa3b8'],
+  'research-agent': ['IN', '#7fa83a'],
+}
+const avatarOf = (role: string): [string, string] =>
+  AVATARS[role] ?? [labelOf(role).charAt(0).toUpperCase() || '?', '#5c6070']
 
 // A delivery's title: its task without the role's own prefix ("BA: …").
 const titleOf = (run: AgentRun) => {
@@ -471,6 +495,9 @@ const ICONS: Record<string, string> = {
   coordinador: '<circle cx="12" cy="12" r="9"/><path d="M15.5 8.5l-2 5-5 2 2-5z"/>',
   grupo: '<circle cx="9" cy="8" r="3.5"/><path d="M2 20c0-3.5 3-5.5 7-5.5s7 2 7 5.5"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18 14.8c2.4.7 4 2.4 4 5.2"/>',
   entregas: '<path d="M12 2l9 5v10l-9 5-9-5V7z"/><path d="M3 7l9 5 9-5M12 12v10"/>',
+  carpeta: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  lista: '<path d="M9 6h12M9 12h12M9 18h12M4 6h.01M4 12h.01M4 18h.01"/>',
+  mas: '<path d="M12 5v14M5 12h14"/>',
 }
 const GLYPHS: Record<string, string> = {
   coordinador: '🧭',
@@ -485,9 +512,14 @@ const GLYPHS: Record<string, string> = {
   'research-agent': '📊',
   grupo: '👥',
   entregas: '📦',
+  carpeta: '📁',
+  lista: '☰',
+  mas: '+',
 }
-const svg = (body: string, size: number) =>
-  `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="#c9ced6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`
+const svg = (body: string, size: number, stroke = '#c9ced6') =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="${stroke}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`
+const disc = (initials: string, color: string, size: number) =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 28 28"><circle cx="14" cy="14" r="14" fill="${color}"/><text x="14" y="${initials.length > 1 ? 18 : 19}" text-anchor="middle" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="${initials.length > 1 ? 11 : 14}" font-weight="600" fill="#ffffff">${initials}</text></svg>`
 
 // The chat. Each message is answered by the model speaking as the role, with
 // no tools: a spawned agent would start without a request of the person's,
@@ -1651,7 +1683,7 @@ export const register: Register = on => {
     // there each icon is a glyph.
     const Select = 'Select' in elements && e.surface !== 'mobile' ? elements.Select : undefined
     const Input = 'Input' in elements && e.surface !== 'mobile' ? elements.Input : undefined
-    const Svg = 'Svg' in elements ? elements.Svg : undefined
+    const Svg = 'Svg' in elements && e.surface !== 'terminal' ? elements.Svg : undefined
     const width = Math.max(20, e.props.bodyColumns)
     const showing = await read($, view)
 
@@ -1659,11 +1691,11 @@ export const register: Register = on => {
     await read($, tick)
     const reading = await read($, planUsage)
     const now = await nowOf($)
+    const isReset = reading?.resetsAt !== undefined && now >= reading.resetsAt
+    const isStale = reading !== null && !isReset && now - reading.seenAt > STALE_MS
+    const percent = reading === null || isReset ? undefined : reading.percent
     const limitBar = () => {
       const cells = Math.max(10, width - 4)
-      const isReset = reading?.resetsAt !== undefined && now >= reading.resetsAt
-      const isStale = reading !== null && !isReset && now - reading.seenAt > STALE_MS
-      const percent = reading === null || isReset ? undefined : reading.percent
       const filled = percent === undefined ? 0 : Math.min(cells, Math.round((Math.min(percent, 100) / 100) * cells) || (percent > 0 ? 1 : 0))
       const color = percent === undefined ? 'inactive' : percent >= 90 ? 'error' : percent >= 70 ? 'warning' : TONE.accent
       const caption =
@@ -1708,9 +1740,9 @@ export const register: Register = on => {
       )
     }
 
-    const icon = (name: string, size = 22) =>
+    const icon = (name: string, size = 22, stroke?: string) =>
       Svg ? (
-        <Svg source={svg(ICONS[name] ?? '', size)} alt={name} width={size} height={size} />
+        <Svg source={svg(ICONS[name] ?? '', size, stroke)} alt={name} width={size} height={size} />
       ) : (
         <Text>{GLYPHS[name] ?? '•'}</Text>
       )
@@ -1736,6 +1768,7 @@ export const register: Register = on => {
 
     if (showing !== '') {
       const isGroup = showing === GROUP
+      const isTerminal = e.surface === 'terminal'
       const all = (await read($, chat)).filter(one => one.channel === showing)
       const said = all.filter(one => one.from === ME).length
       const lines = all.filter(one => !one.isPending)
@@ -1744,9 +1777,13 @@ export const register: Register = on => {
       const shownLines = isEarlier ? lines : lines.slice(-SHOWN)
       const hidden = lines.length - shownLines.length
       const offered = await read($, offer)
-      const room = isGroup
-        ? 'Escribe al Coordinador, o nombra a un agente con @ (@po, @qa, @dev…)'
-        : `Escribe a ${labelOf(showing)}`
+      const isOffered = offered !== null && offered.channel === showing
+      const isLimitOpen = await read($, limitOpen)
+      const typed = await read($, draft)
+      const prefill = typed?.channel === showing ? typed.text : undefined
+      const working = (await read($, runs)).filter(one => one.status === 'trabajando')
+      const stopped = await read($, paused)
+      const lead = isGroup ? COORD : showing
       const back = (key: string) => (
         <Button
           key={key}
@@ -1759,15 +1796,74 @@ export const register: Register = on => {
           <Text dimColor>← Equipo</Text>
         </Button>
       )
+      const rule = <Text color={TONE.border} wrap="truncate-end">{'─'.repeat(Math.max(10, width - 2))}</Text>
+
+      // Under the title: who is at work, or that the chat is free.
+      const ownRun = working.find(one => one.role === showing)
+      const [dot, state] = isPaused(stopped, lead)
+        ? ['warning', isGroup ? 'Equipo en pausa' : 'En pausa']
+        : isGroup && working.length > 0
+          ? [TONE.accent, `${names([...new Set(working.map(one => one.role))])} trabajando`]
+          : ownRun !== undefined
+            ? [TONE.accent, `Trabajando en «${titleOf(ownRun)}»`]
+            : [TONE.available, isGroup ? 'Coordinador disponible' : 'Disponible']
+
+      // The work handed on from this chat that is still under way.
+      const pending = (await read($, requests))
+        .filter(one => (one.channel ?? GROUP) === showing && ['recibido', 'enviado', 'iniciado'].includes(statusOf(one)))
+        .at(-1)
+
+      const avatar = (role: string) => {
+        const [initials, color] = avatarOf(role)
+        return Svg ? (
+          <Box flexShrink={0}>
+            <Svg source={disc(initials, color, 28)} alt={labelOf(role)} width={28} height={28} />
+          </Box>
+        ) : (
+          <Text bold color={color}>
+            {GLYPHS[role] ?? '●'}
+          </Text>
+        )
+      }
+      // A message of a role: its mark, its name, and what it said, unboxed.
+      const spoken = (key: string, role: string, text: string) => (
+        <Box key={key} flexDirection="row" gap={1} alignItems="flex-start" width="100%">
+          {avatar(role)}
+          <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
+            <Text dimColor size="caption" weight="medium">
+              {labelOf(role)}
+            </Text>
+            <Markdown text={text} />
+          </Box>
+        </Box>
+      )
+      // A quick ask under the last answer, as a chip.
+      const chip = (key: string, name: string, label: string, onPress: () => unknown) => (
+        <Box
+          key={`${key}-chip`}
+          flexDirection="row"
+          gap={1}
+          alignItems="center"
+          borderStyle="round"
+          borderColor={TONE.border}
+          backgroundColor={fill(TONE.card)}
+          hover={{ borderColor: TONE.hover }}
+          paddingX={1}
+        >
+          {icon(name, 16)}
+          <Button key={key} plain onPress={onPress}>
+            {label}
+          </Button>
+        </Box>
+      )
+      const last = lines.at(-1)
+      const isQuiet = typing.length === 0 && !isOffered && (last === undefined || last.from !== ME)
+      const startTask = () => update($, draft, () => ({ channel: showing, text: 'Nueva tarea: ' }))
+
       return (
         <Box flexDirection="column" gap={1}>
-          {limitBar()}
-          <Box flexDirection="row" flexWrap="wrap" justifyContent="space-between" alignItems="center" gap={1}>
-            <Box flexDirection="row" gap={1} alignItems="center">
-              {back('volver')}
-              {tile(isGroup ? 'grupo' : showing, 16)}
-              <Text bold>{isGroup ? 'Chat de grupo' : labelOf(showing)}</Text>
-            </Box>
+          <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
+            {back('volver')}
             {lines.length > 0 && (
               <Button
                 key="vaciar"
@@ -1778,46 +1874,119 @@ export const register: Register = on => {
               </Button>
             )}
           </Box>
+          <Box flexDirection="row" flexWrap="wrap" justifyContent="space-between" alignItems="center" gap={1}>
+            <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1} minWidth={0}>
+              <Box
+                backgroundColor={fill(isGroup ? TONE.headTile : TONE.tile)}
+                borderStyle={isTerminal ? 'round' : undefined}
+                borderColor="inactive"
+                paddingX={1}
+                paddingY={isTerminal ? 0 : 'xs'}
+                flexShrink={0}
+              >
+                {icon(isGroup ? 'grupo' : showing, 22, isGroup ? TONE.accent : undefined)}
+              </Box>
+              <Box flexDirection="column" flexShrink={1} minWidth={0}>
+                <Text bold size="heading" wrap="truncate-end">
+                  {isGroup ? 'Chat del equipo' : labelOf(showing)}
+                </Text>
+                <Text size="caption" wrap="truncate-end">
+                  <Text color={dot}>●</Text> <Text dimColor>{state}</Text>
+                </Text>
+              </Box>
+            </Box>
+            <Box
+              key="sesion-caja"
+              borderStyle="round"
+              borderColor={TONE.border}
+              hover={{ borderColor: TONE.hover }}
+              paddingX={1}
+              flexShrink={0}
+            >
+              <Button key="sesion" plain onPress={() => update($, limitOpen, isOn => !isOn)}>
+                <Text color={percent !== undefined && percent >= 90 ? 'error' : percent !== undefined && percent >= 70 ? 'warning' : undefined}>
+                  Sesión {percent === undefined ? '—' : percentText(percent)}
+                </Text>
+                <Text dimColor> {isLimitOpen ? '▴' : '▾'}</Text>
+              </Button>
+            </Box>
+          </Box>
+          {isLimitOpen && limitBar()}
+          {pending !== undefined && (
+            <Box
+              key="pendiente"
+              flexDirection="row"
+              gap={1}
+              alignItems="center"
+              justifyContent="space-between"
+              borderStyle="round"
+              borderColor={TONE.border}
+              backgroundColor={fill(TONE.card)}
+              paddingX={1}
+              paddingY={isTerminal ? 0 : 'xs'}
+            >
+              <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1} minWidth={0}>
+                {icon('carpeta', 18)}
+                <Text wrap="truncate-end">
+                  <Text bold>{short(pending.goal, 60)}</Text>
+                  <Text dimColor> · {REQUEST_CHIP[statusOf(pending)]}</Text>
+                </Text>
+              </Box>
+              <Button
+                key="ver-pendiente"
+                plain
+                onPress={async () => {
+                  await update($, view, () => GROUP)
+                  await send($, GROUP, '¿Qué está pendiente?')
+                }}
+              >
+                <Text color={TONE.accent}>Ver pendiente</Text>
+              </Button>
+            </Box>
+          )}
+          {rule}
+          <Box flexDirection="row" justifyContent="center">
+            <Text dimColor size="caption" weight="medium">
+              {isGroup ? 'CONVERSACIÓN CON EL EQUIPO' : `CONVERSACIÓN CON ${labelOf(showing).toUpperCase()}`}
+            </Text>
+          </Box>
           {hidden > 0 && (
             <Button key="anteriores" plain onPress={() => update($, earlier, () => true)}>
               <Text color={TONE.accent}>Ver {hidden} mensajes anteriores</Text>
             </Button>
           )}
-          {lines.length === 0 && typing.length === 0 && (
-            <Text dimColor>
-              {isGroup
-                ? 'Escribe al Coordinador: pregúntale «¿cómo va…?» o pídele una función nueva. Para hablar con un agente, nómbralo con @.'
-                : `Escribe a ${labelOf(showing)} para empezar.`}
-            </Text>
-          )}
+          {lines.length === 0 &&
+            typing.length === 0 &&
+            spoken(
+              'bienvenida',
+              lead,
+              isGroup
+                ? '¡Hola! ¿Qué quieres que trabajemos hoy? Pregúntame «¿cómo va…?», pídeme una tarea nueva o nombra a un agente con @.'
+                : `Escribe a ${labelOf(showing)} para empezar.`,
+            )}
           {shownLines.map(one => {
-            const isMine = one.from === ME
             if (one.isNote) {
               return (
-                <Text key={`mensaje-${one.id}`} dimColor italic>
+                <Text key={`mensaje-${one.id}`} dimColor italic size="caption">
                   {one.text}
                 </Text>
               )
             }
+            if (one.from !== ME) return spoken(`mensaje-${one.id}`, one.from, one.text)
             return (
-              <Box
-                key={`mensaje-${one.id}`}
-                flexDirection="column"
-                alignSelf={isMine ? 'flex-end' : 'flex-start'}
-                width={isMine ? undefined : '100%'}
-                backgroundColor={fill(isMine ? TONE.tabOn : TONE.card)}
-                borderStyle="round"
-                borderColor={isMine ? TONE.accent : TONE.border}
-                paddingX={1}
-              >
-                {!isMine && (
-                  <Box flexDirection="row" gap={1} alignItems="center">
-                    <Text bold color="claude" size="caption">
-                      {labelOf(one.from)}
-                    </Text>
-                  </Box>
-                )}
-                <Markdown text={one.text} />
+              <Box key={`mensaje-${one.id}`} flexDirection="column" alignItems="flex-end" alignSelf="flex-end">
+                <Box
+                  backgroundColor={fill(TONE.mine)}
+                  borderStyle="round"
+                  borderColor={isTerminal ? TONE.accent : TONE.mine}
+                  paddingX={1}
+                  paddingY={isTerminal ? 0 : 'xs'}
+                >
+                  <Text color={isTerminal ? undefined : TONE.mineText}>{one.text}</Text>
+                </Box>
+                <Text dimColor size="caption">
+                  Tú
+                </Text>
               </Box>
             )
           })}
@@ -1826,24 +1995,51 @@ export const register: Register = on => {
               {typing.join(', ')} {typing.length === 1 ? 'está' : 'están'} escribiendo…
             </Text>
           )}
-          {offered !== null && offered.channel === showing && (
-            <Box key="oferta" flexDirection="column" gap={1} borderStyle="round" borderColor="warning" paddingX={1}>
-              <Text>
-                {names(offered.roles)} no {offered.roles.length === 1 ? 'está' : 'están'} en el equipo de esta sesión. ¿
-                {offered.roles.length === 1 ? 'Lo' : 'Los'} incorporo
-                {offered.task !== undefined
-                  ? ` y ${offered.roles.length === 1 ? 'le' : 'les'} paso el encargo`
-                  : offered.messageId
-                    ? ` y ${offered.roles.length === 1 ? 'le' : 'les'} paso el mensaje`
-                    : ''}
-                ?
-              </Text>
-              <Box flexDirection="row" flexWrap="wrap" gap={2}>
-                <Button key="incorporar" variant="primary" onPress={() => accept($)}>
-                  Incorporar
+          {isQuiet && (
+            <Box key="atajos" flexDirection="row" flexWrap="wrap" gap={1}>
+              {isGroup
+                ? chip('atajo-pendiente', 'lista', '¿Qué está pendiente?', () => send($, GROUP, '¿Qué está pendiente?'))
+                : chip('atajo-estado', 'lista', '¿En qué estás?', () => send($, showing, '¿En qué estás ahora?'))}
+              {Input && chip('atajo-tarea', 'mas', 'Nueva tarea', startTask)}
+            </Box>
+          )}
+          {isOffered && (
+            <Box
+              key="oferta"
+              flexDirection="column"
+              gap={1}
+              borderStyle="round"
+              borderColor={TONE.border}
+              backgroundColor={fill(TONE.card)}
+              paddingX={1}
+              paddingY={isTerminal ? 0 : 'xs'}
+            >
+              <Box flexDirection="row" gap={1} alignItems="flex-start">
+                {icon('grupo', 22, TONE.accent)}
+                <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
+                  <Text bold>Incorporar al equipo</Text>
+                  <Text dimColor>
+                    {names(offered.roles)} no {offered.roles.length === 1 ? 'está' : 'están'} en el equipo de esta sesión. ¿
+                    {offered.roles.length === 1 ? 'Lo' : 'Los'} incorporo
+                    {offered.task !== undefined
+                      ? ` y ${offered.roles.length === 1 ? 'le' : 'les'} paso el encargo`
+                      : offered.messageId
+                        ? ` y ${offered.roles.length === 1 ? 'le' : 'les'} paso el mensaje`
+                        : ''}
+                    ?
+                  </Text>
+                </Box>
+                <Button key="no-incorporar" label="Ahora no" plain onPress={() => decline($)}>
+                  <Text dimColor>✕</Text>
                 </Button>
-                <Button key="no-incorporar" plain onPress={() => decline($)}>
-                  <Text dimColor>Ahora no</Text>
+              </Box>
+              {rule}
+              <Box flexDirection="row" flexWrap="wrap" justifyContent="space-between" alignItems="center" gap={1}>
+                <Text dimColor size="caption">
+                  Siguiente paso
+                </Text>
+                <Button key="incorporar" variant="secondary" onPress={() => accept($)}>
+                  Incorporar
                 </Button>
               </Box>
             </Box>
@@ -1852,21 +2048,30 @@ export const register: Register = on => {
             // The field takes the pane's whole width, two lines tall, with room
             // below so its focus ring is not cut off. Its key moves on with each
             // message the person sends, so it starts empty, and stays put while
-            // answers arrive, so what they are typing is kept.
+            // answers arrive, so what they are typing is kept. «Nueva tarea»
+            // moves it on too, to start it with that text.
             <Box key="caja" flexDirection="column" width="100%" paddingY={1} gap={1}>
+              <Text dimColor size="caption">
+                ↪ Responde{' '}
+                <Text bold>{isGroup ? 'el Coordinador' : labelOf(showing)}</Text>
+                {isGroup ? ' · usa @ para elegir un agente' : ''}
+              </Text>
               <Input
-                key={`entrada-${showing}-${said}`}
-                placeholder={room}
-                value=""
+                key={`entrada-${showing}-${said}${prefill === undefined ? '' : '-tarea'}`}
+                placeholder={isGroup ? 'Cuéntame qué necesitas…' : `Escribe a ${labelOf(showing)}…`}
+                value={prefill ?? ''}
                 rows={2}
                 submitLabel="enviar"
                 autoFocus
-                onSubmit={text => send($, showing, text)}
+                onSubmit={async text => {
+                  await update($, draft, () => null)
+                  await send($, showing, text)
+                }}
               />
-              <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+              <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
                 {back('volver-abajo')}
-                <Text dimColor size="caption">
-                  Enter envía
+                <Text dimColor size="caption" wrap="truncate-end">
+                  Enter envía · Mayús + Enter añade línea
                 </Text>
               </Box>
             </Box>

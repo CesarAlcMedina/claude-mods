@@ -571,6 +571,9 @@ test('un encargo en el chat de un agente, o con @ en el grupo, llega al Coordina
   expect(await shows(/_Se lo pasé al Coordinador como encargo: «Investiga la librería pdfkit»_/)).toBe(true)
   await until(() => submits.length === 3)
   expect(submits.at(-1)).toContain('Agente: Investigación (agent-control-center:research-agent)')
+  // The work under way shows above the conversation.
+  expect(await ui.find({ key: 'ver-pendiente' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Investiga la librería pdfkit$/ })).toBeDefined()
 
   // Taken for a question, the Coordinador still sees work in it and hands it on.
   await ui.input({ key: 'entrada-grupo-1', text: '¿Me miras los precios de Acme y Globex?' })
@@ -1133,8 +1136,11 @@ test('la barra del límite de 5 h: sin datos, 0 %, intermedio, límite, desactua
   expect(await ui.find({ type: 'Text', text: /^3 %$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^Se restablece en 4 h 59 min$/ })).toBeDefined()
 
-  // The bar heads each chat too, and the team below it still works.
+  // Each chat has it in its «Sesión» chip, the whole bar a press away, and the team below it still works.
   await ui.press({ key: 'chat-grupo' })
+  expect(await ui.find({ key: 'limite-sesion' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', text: /^Sesión 3 % ▾$/ })).toBeDefined()
+  await ui.press({ key: 'sesion' })
   expect(await ui.find({ key: 'limite-sesion' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^3 %$/ })).toBeDefined()
   await ui.press({ key: 'volver' })
@@ -1220,4 +1226,48 @@ test('los agentes publican avances y se consultan entre ellos en el chat', async
   expect(await tool({ tool: 'mcp__panel-agentes__consultar', agente: 'research', pregunta: '¿Y tú?', agentId: 'a1' })).toMatchObject({ result: 'No puedes consultarte a ti mismo.' })
   expect(prompts.length).toBe(1)
   await ui.unmount()
+})
+
+test('el chat del equipo: cabecera, avatares, atajos y una tarea nueva', async ($, on) => {
+  const usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
+  mock.store(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('model.complete', () => ({ value: { isAnswered: true as const, text: 'TIPO: otro\n@po: opinar', usage } }))
+  on('model.fork', (_, e) => {
+    const text = e.prompt.includes('eres el Coordinador') ? '¡Hola! Aquí estoy.' : 'Opinión del PO.'
+    return { value: { isAnswered: true as const, text, usage } }
+  })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'chat-grupo' })
+
+  // The head: who answers and whether they are free, and the session in a chip.
+  expect(await ui.find({ type: 'Text', text: /^Chat del equipo$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Coordinador disponible$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: /^Sesión — ▾$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^CONVERSACIÓN CON EL EQUIPO$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Markdown', text: /¿Qué quieres que trabajemos hoy\?/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^↪ Responde el Coordinador · usa @ para elegir un agente$/ })).toBeDefined()
+  expect((await ui.find({ key: 'entrada-grupo-0' }))?.props).toMatchObject({ placeholder: 'Cuéntame qué necesitas…' })
+
+  // The person's message in their own bubble, the answers beside each speaker's mark.
+  await ui.input({ key: 'entrada-grupo-0', text: 'Hola, ¿qué tal?' })
+  expect(await ui.find({ type: 'Text', text: /^Hola, ¿qué tal\?$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Tú$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Coordinador$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Svg' })).toBeDefined()
+  expect(await ui.find({ type: 'Markdown', text: /Aquí estoy/ })).toBeDefined()
+
+  // Under the last answer, quick asks; «Nueva tarea» starts the field with it.
+  expect(await ui.find({ key: 'atajo-pendiente' })).toBeDefined()
+  await ui.press({ key: 'atajo-tarea' })
+  expect((await ui.find({ key: 'entrada-grupo-1-tarea' }))?.props).toMatchObject({ value: 'Nueva tarea: ' })
+  await ui.input({ key: 'entrada-grupo-1-tarea', text: 'Nueva tarea: probar el login' })
+  expect((await ui.find({ key: 'entrada-grupo-2' }))?.props).toMatchObject({ value: '' })
+  await ui.unmount()
+
+  // The terminal draws no pictures: each mark is the role's glyph.
+  const term = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  if (await term.find({ key: 'chat-grupo' })) await term.press({ key: 'chat-grupo' })
+  expect(await term.find({ type: 'Text', text: /^🧭$/ })).toBeDefined()
+  await term.unmount()
 })
