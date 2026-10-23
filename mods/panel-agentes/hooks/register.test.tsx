@@ -558,6 +558,7 @@ test('un encargo en el chat de un agente, o con @ en el grupo, llega al Coordina
   mock.store(on)
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('agent.spawn', () => ({ model: 'test', agentId: `a${++count}` }))
+  on('tool.call', () => ({ result: {} }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
   on('prompt.submit', (_, e) => {
@@ -630,6 +631,18 @@ test('un encargo en el chat de un agente, o con @ en el grupo, llega al Coordina
   // The work under way shows above the conversation.
   expect(await ui.find({ key: 'ver-pendiente' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^@research investiga pdfkit$/ })).toBeDefined()
+  // The turn the order starts says which request it is, even with no
+  // prompt.submit of it seen: the Coordinador's research ends it and is its
+  // delivery.
+  await $.prompt.submit({ text: 'otra cosa', wait: false, origin: { kind: 'composer' } })
+  await $.turn.start({ text: submits.at(-1) ?? '', turnId: 'r1' })
+  await $.tool.call({ tool: 'WebSearch', query: 'pdfkit license' } as never)
+  expect(await shows(/^Estoy investigando «investiga pdfkit»\.$/)).toBe(true)
+  await $.turn.complete({ answer: 'pdfkit es MIT. Guardado en docs/investigaciones/2026-10-23-pdfkit.md.', durationMs: 1000, isAborted: false, turnId: 'r1', reason: 'answer' })
+  expect(await shows(/^pdfkit es MIT\. Guardado en docs\/investigaciones\/2026-10-23-pdfkit\.md\.$/)).toBe(true)
+  await ui.press({ key: 'volver' })
+  expect((await ui.find({ key: 'tarjeta-coordinador' }))?.text).toContain('Última entrega')
+  await ui.press({ key: 'chat-grupo' })
 
   // Taken for a question, the Coordinador still sees work in it and takes it.
   picked = 'TIPO: otro\n@po: opinar'
@@ -1264,7 +1277,7 @@ test('los agentes publican avances y se consultan entre ellos en el chat', async
   expect(submits[0]).toContain('guarda el informe y actualiza el índice según «Investigaciones del proyecto»')
   await $.turn.start({ text: '', turnId: 'm1' })
   // The Coordinador tells each step of the flow.
-  expect(await tool({ tool: 'mcp__panel-agentes__avance', texto: 'Lanzo a QA para probar los navegadores.' })).toMatchObject({ result: 'Publicado en el panel.' })
+  expect(await tool({ tool: 'mcp__panel-agentes__avance', texto: 'Coordinador: Lanzo a QA para probar los navegadores.' })).toMatchObject({ result: 'Publicado en el panel.' })
   expect(await shows(/^Lanzo a QA para probar los navegadores\.$/)).toBe(true)
   await $.agent.spawn({
     tool_use_id: 't',
