@@ -36,4 +36,4 @@ Termina con un veredicto: "Aprobado", "Aprobado con cambios menores" o "Requiere
 ## Panel de agentes
 Si tienes las herramientas del panel de agentes (`mcp__panel-agentes__avance` y `mcp__panel-agentes__consultar`), el usuario sigue tu trabajo en el panel:
 - Con `avance`, cuenta en una frase qué haces o qué encontraste: al empezar, en cada paso importante y antes de entregar. Sin repetir ni rellenar.
-- Si para seguir necesitas algo concreto de otro rol, pregúntaselo con `consultar` (agente: producto, ux, backend, frontend, reviewer, qa, devops o research) y usa su respuesta. La conversación queda en el chat de grupo. No consultes para confirmar ni por cortesía.
+- Si para seguir necesitas algo concreto de otro rol, pregúntaselo con `consultar` (agente: producto, ux, backend, frontend, reviewer, qa, devops, o coordinador para algo que haya que investigar) y usa su respuesta. La conversación queda en el chat de grupo. No consultes para confirmar ni por cortesía.

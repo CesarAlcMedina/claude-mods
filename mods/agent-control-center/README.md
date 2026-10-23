@@ -1,6 +1,6 @@
 # agent-control-center
 
-Ocho subagentes de Claude Code que trabajan como un equipo de software, y la skill `coordinador` que los orquesta.
+Siete especialistas (subagentes de Claude Code) que trabajan como un equipo de software, y la skill `coordinador`, con la que la sesión principal hace de **Coordinador**: el agente principal que dirige al equipo y hace él mismo las investigaciones.
 
 | Agente | Rol | Permisos |
 |---|---|---|
@@ -11,9 +11,8 @@ Ocho subagentes de Claude Code que trabajan como un equipo de software, y la ski
 | code-reviewer | Calidad, seguridad, rendimiento (sin modificar) | Solo lectura |
 | qa-engineer | Plan de pruebas ISTQB, E2E, API, defectos | Edita pruebas y ejecuta |
 | devops-engineer | CI/CD, Docker, GitHub Actions (sin producción sin aprobación) | Edita infraestructura y ejecuta |
-| research-agent | Investigación con fuentes | Solo lectura + web |
 
-Flujo: product-analyst → ux-ui-designer (si hay interfaz) → backend-engineer y/o frontend-engineer → code-reviewer → qa-engineer → devops-engineer, con research-agent como apoyo.
+Flujo: product-analyst → ux-ui-designer (si hay interfaz) → backend-engineer y/o frontend-engineer → code-reviewer → qa-engineer → devops-engineer. Las investigaciones las hace el Coordinador en cualquier fase.
 
 Instalar: `/plugin install agent-control-center --marketplace CesarAlcMedina/claude-mods` (o en la app: **+** → **Plugins** → **Add plugin**).
 
@@ -25,4 +24,4 @@ Los plugins no pueden traer permisos de `settings.json`. Para que Claude pida co
 
 **Producto y negocio** (`product-analyst`) sustituye a product-owner y business-analyst: un solo agente hace las dos partes en una entrega, ajustada al encargo (una respuesta directa para una pregunta sencilla, una definición con trazabilidad para una función compleja). Su método está en la skill `producto-negocio`, que el agente carga al empezar con el campo `skills` de su definición; la skill no aparece en el menú de comandos.
 
-**Investigaciones del proyecto.** Lo que entrega research-agent se conserva en el propio proyecto, en `docs/investigaciones/` (o en una carpeta equivalente si el proyecto ya tiene una), con un `indice.md` donde cada investigación sale con su tema, fecha, estado (completa, parcial o bloqueada, con lo que falta), si es la vigente y el enlace. research-agent sigue siendo de solo lectura más web: entrega el informe (pregunta y alcance, hallazgos, conclusiones, fuentes con fecha de consulta, contradicciones y datos sin verificar, recomendaciones y limitaciones) y lo guarda el coordinador, que solo dice «Guardado» después de comprobar el archivo y el índice; si no puede guardar, explica por qué y te deja el informe completo. Al actualizar una investigación se crea otra versión (`-v2`…) y la anterior queda marcada como sustituida, sin borrarse. Antes de investigar, el coordinador mira si ya hay un informe vigente; a los demás agentes les pasa la ruta y un resumen de los que les sirven, y ellos lo leen cuando necesitan el detalle. Las recomendaciones de un informe no son requisitos: solo lo que figure en sus «Decisiones del usuario».
+**Investigaciones (Coordinador).** Desde la 0.10.0 ya no hay agente Investigación (`research-agent`): el Coordinador busca en la web, consulta las fuentes, compara y redacta el informe con sus propias herramientas de la sesión principal (WebSearch, WebFetch, Read, Grep, Glob y Write para guardar), sin lanzar ningún subagente. Cada informe distingue hallazgos verificados, suposiciones, recomendaciones y cuestiones pendientes, con las fuentes y su fecha de consulta. Se guarda en el propio proyecto, en `docs/investigaciones/` (o en una carpeta equivalente si el proyecto ya tiene una), con un `indice.md` donde cada investigación sale con su tema, fecha, estado (completa, parcial o bloqueada, con lo que falta), si es la vigente y el enlace. El Coordinador solo dice «Guardado» después de comprobar el archivo y el índice; si no puede guardar, explica por qué y te deja el informe completo. Al actualizar una investigación se crea otra versión (`-v2`…) y la anterior queda marcada como sustituida, sin borrarse. Antes de investigar mira si ya hay un informe vigente; a los especialistas les pasa la ruta y un resumen de los que les sirven, y ellos lo leen cuando necesitan el detalle. Si un especialista necesita algo investigado, se lo pregunta al Coordinador. Las recomendaciones de un informe no son requisitos: solo lo que figure en sus «Decisiones del usuario».
