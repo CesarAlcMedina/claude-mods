@@ -39,18 +39,22 @@ const coordAtom = atom({ plugin: 'panel-agentes', key: 'coord' } as const, { isB
 // short names an @mention in the group chat may use.
 const TEAM: { role: string; label: string; aliases: string[]; job: string }[] = [
   { role: 'product-analyst', label: 'Producto y negocio', aliases: ['producto', 'po', 'ba', 'analista', 'negocio'], job: 'el problema, el usuario y el valor, alcance, prioridades e historias, requisitos, reglas de negocio y criterios de aceptación verificables' },
-  { role: 'ux-ui-designer', label: 'Diseño UX/UI', aliases: ['ux', 'ui', 'diseño'], job: 'flujos, wireframes, estados de los componentes y accesibilidad' },
   { role: 'backend-engineer', label: 'Backend', aliases: ['backend', 'back', 'dev'], job: 'APIs, lógica de negocio, datos e integraciones del lado del servidor, con pruebas unitarias' },
-  { role: 'frontend-engineer', label: 'Frontend', aliases: ['frontend', 'front', 'dev'], job: 'componentes, pantallas, estilos, accesibilidad y consumo de APIs, con pruebas unitarias' },
-  { role: 'code-reviewer', label: 'Revisión de código', aliases: ['reviewer', 'revision', 'revisión'], job: 'calidad, mantenibilidad, seguridad, rendimiento y errores lógicos del código' },
-  { role: 'qa-engineer', label: 'QA', aliases: ['qa'], job: 'estrategia y planes de prueba, escenarios positivos, negativos y de borde, y defectos' },
+  { role: 'frontend-engineer', label: 'Diseño y Frontend', aliases: ['frontend', 'front', 'dev', 'ux', 'ui', 'diseño', 'diseno'], job: 'diseño de flujos, estados y accesibilidad, y su implementación: componentes, pantallas, estilos y consumo de APIs, con pruebas unitarias' },
+  { role: 'qa-engineer', label: 'Calidad', aliases: ['calidad', 'qa', 'reviewer', 'revision', 'revisión'], job: 'revisión de código (lógica, seguridad, rendimiento, mantenibilidad) y pruebas: planes, escenarios positivos, negativos y de borde, y defectos' },
   { role: 'devops-engineer', label: 'DevOps', aliases: ['devops'], job: 'CI/CD, Docker y automatización de builds y despliegues' },
 ]
 
 // Roles merged into another: Product Owner and Analista de negocio are now
-// one, Producto y negocio. What was kept under them goes to it, and an agent
-// of theirs still at work counts as it.
-const MERGED: Record<string, string> = { 'product-owner': 'product-analyst', 'business-analyst': 'product-analyst' }
+// one, Producto y negocio; Diseño UX/UI went into Frontend (Diseño y
+// Frontend) and Revisión de código into QA (Calidad). What was kept under
+// them goes to it, and an agent of theirs still at work counts as it.
+const MERGED: Record<string, string> = {
+  'product-owner': 'product-analyst',
+  'business-analyst': 'product-analyst',
+  'ux-ui-designer': 'frontend-engineer',
+  'code-reviewer': 'qa-engineer',
+}
 const merged = (role: string) => MERGED[role] ?? role
 
 const roleOf = (subagentType: string) =>
@@ -62,6 +66,8 @@ const FORMER: Record<string, string> = {
   'product-owner': 'Product Owner',
   'business-analyst': 'Analista de negocio',
   'research-agent': 'Investigación',
+  'ux-ui-designer': 'Diseño UX/UI',
+  'code-reviewer': 'Revisión de código',
 }
 
 // The Coordinador is the main session itself, running agent-control-center's
@@ -1043,8 +1049,8 @@ const facts = async ($: EngineInterface) => {
     )
     lines.push(
       checked && builds.every(one => one.status === 'entregado')
-        ? 'QA entregó después del desarrollo: su resumen dice si las pruebas pasan.'
-        : 'No consta ninguna entrega de QA posterior al desarrollo: nada está verificado.',
+        ? 'Calidad entregó después del desarrollo: su resumen dice si la revisión y las pruebas pasan.'
+        : 'No consta ninguna entrega de Calidad posterior al desarrollo: nada está verificado.',
     )
   }
   return lines.join('\n')
@@ -1061,7 +1067,7 @@ const report = async ($: EngineInterface, history: ChatMessage[], message: ChatM
       'Cómo respondes:',
       '- Identifica la tarea por la que pregunta y a sus responsables. Si no está claro de cuál habla, di de cuál informas.',
       '- Di qué está terminado, qué queda pendiente y si hay algún bloqueo, en pocas frases o una lista corta.',
-      '- Usa los estados con su sentido exacto: solicitado (se pidió y no consta que haya empezado), iniciado (un agente trabaja en ello ahora), terminado (el agente entregó), verificado (QA lo probó después del desarrollo y su informe dice que pasa). No llames verificado a nada que no cumpla eso.',
+      '- Usa los estados con su sentido exacto: solicitado (se pidió y no consta que haya empezado), iniciado (un agente trabaja en ello ahora), terminado (el agente entregó), verificado (Calidad lo revisó y probó después del desarrollo y su informe dice que pasa). No llames verificado a nada que no cumpla eso.',
       '- Lo que no se pueda confirmar con estos datos, dilo claramente; no lo supongas.',
     ].join('\n'),
     VOICE,
@@ -1703,11 +1709,11 @@ export const register: Register = on => {
       .register({
         name: 'consultar',
         description:
-          'Panel de agentes: pregunta algo concreto a otro agente del equipo (producto, ux, backend, frontend, reviewer, qa, devops, o coordinador para algo que haya que investigar) en el chat de grupo, y recibe su respuesta. Solo cuando la necesites para seguir.',
+          'Panel de agentes: pregunta algo concreto a otro agente del equipo (producto, frontend para diseño e interfaz, backend, calidad para revisión y pruebas, devops, o coordinador para algo que haya que investigar) en el chat de grupo, y recibe su respuesta. Solo cuando la necesites para seguir.',
         inputSchema: {
           type: 'object',
           properties: {
-            agente: { type: 'string', description: 'A quién: producto, ux, backend, frontend, reviewer, qa, devops o coordinador' },
+            agente: { type: 'string', description: 'A quién: producto, frontend, backend, calidad, devops o coordinador' },
             pregunta: { type: 'string', description: 'La pregunta, concreta' },
           },
           required: ['agente', 'pregunta'],

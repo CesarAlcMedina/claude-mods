@@ -8,8 +8,8 @@
     {
       "name": "agent-control-center",
       "source": "./mods/agent-control-center",
-      "description": "Siete especialistas (Producto y negocio, UX/UI, Backend, Frontend, Reviewer, QA, DevOps) y el Coordinador, que dirige al equipo e investiga",
-      "version": "0.10.0",
+      "description": "Cinco especialistas (Producto y negocio, Diseño y Frontend, Backend, Calidad, DevOps) y el Coordinador, que dirige al equipo e investiga",
+      "version": "0.11.0",
       "author": {
         "name": "Eres"
       },
@@ -19,7 +19,7 @@
       "name": "panel-agentes",
       "source": "./mods/panel-agentes",
       "description": "Panel junto al chat que muestra qué agente del Agent Control Center está trabajando y qué entregó cada uno",
-      "version": "0.19.1",
+      "version": "0.20.0",
       "author": {
         "name": "Eres"
       },

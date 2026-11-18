@@ -1,27 +1,27 @@
 # agent-control-center
 
-Siete especialistas (subagentes de Claude Code) que trabajan como un equipo de software, y la skill `coordinador`, con la que la sesión principal hace de **Coordinador**: el agente principal que dirige al equipo y hace él mismo las investigaciones.
+Cinco especialistas (subagentes de Claude Code) que trabajan como un equipo de software, y la skill `coordinador`, con la que la sesión principal hace de **Coordinador**: el agente principal que dirige al equipo y hace él mismo las investigaciones.
 
 | Agente | Rol | Permisos |
 |---|---|---|
-| product-analyst (Producto y negocio) | Problema, usuario y valor, alcance, prioridades e historias, requisitos, reglas de negocio y criterios Given/When/Then, ajustados al encargo | Solo lectura |
-| ux-ui-designer | Flujos, wireframes, estados, accesibilidad | Solo lectura |
+| product-analyst (Producto y negocio) | Problema, usuario y valor, alcance, prioridades e historias, requisitos, reglas de negocio y criterios Given/When/Then con sus casos de prueba, ajustados al encargo | Solo lectura |
+| frontend-engineer (Diseño y Frontend) | Diseña flujos, estados y accesibilidad, y luego implementa componentes, pantallas, estilos y consumo de APIs, con pruebas unitarias | Edita y ejecuta |
 | backend-engineer | APIs, lógica de negocio, datos e integraciones, con pruebas unitarias | Edita y ejecuta |
-| frontend-engineer | Componentes, pantallas, estilos, accesibilidad y consumo de APIs, con pruebas unitarias | Edita y ejecuta |
-| code-reviewer | Calidad, seguridad, rendimiento (sin modificar) | Solo lectura |
-| qa-engineer | Plan de pruebas ISTQB, E2E, API, defectos | Edita pruebas y ejecuta |
+| qa-engineer (Calidad) | Revisión de código (lógica, seguridad, rendimiento) y pruebas ISTQB, E2E, API, defectos, en una sola pasada | Edita pruebas y ejecuta |
 | devops-engineer | CI/CD, Docker, GitHub Actions (sin producción sin aprobación) | Edita infraestructura y ejecuta |
 
-Flujo: product-analyst → ux-ui-designer (si hay interfaz) → backend-engineer y/o frontend-engineer → code-reviewer → qa-engineer → devops-engineer. Las investigaciones las hace el Coordinador en cualquier fase.
+Flujo: product-analyst → backend-engineer y/o frontend-engineer → qa-engineer → devops-engineer. Las investigaciones las hace el Coordinador en cualquier fase.
 
 Instalar: `/plugin install agent-control-center --marketplace CesarAlcMedina/claude-mods` (o en la app: **+** → **Plugins** → **Add plugin**).
 
 Uso: "Usa el Agent Control Center para…", `/agent-control-center:coordinador`, o un agente directo: "Usa product-analyst para…". Para verlos, pregúntale a Claude «¿qué agentes tienes?».
 
-El coordinador también lleva dos recorridos: **Nueva función** (prepara historias, requisitos y criterios con Producto y negocio y QA, y luego pasa a desarrollo y a pruebas, corrigiendo lo que falle) y **Consultar avances** (pregunta «¿cómo va…?» y te dice qué está terminado, qué falta y si hay bloqueos, sin lanzar nada). Con el plugin panel-agentes, el Chat de grupo del panel le pasa los mensajes que no nombran a ningún agente, y los encargos que haces en el panel le llegan directamente («Encargo del usuario desde el panel de agentes»): los ejecuta lanzando a los agentes, sin que tengas que repetirlos en el chat principal. Con el panel instalado, cada agente publica allí sus avances y consulta a otro rol en el Chat de grupo cuando lo necesita. Si eliges el equipo de la sesión con **Configurar equipo** en el panel, el coordinador usa solo esos agentes y te propone incorporar los que falten.
+El coordinador también lleva dos recorridos: **Nueva función** (prepara historias, requisitos, criterios y casos de prueba con Producto y negocio, y luego pasa a desarrollo y a pruebas, corrigiendo lo que falle) y **Consultar avances** (pregunta «¿cómo va…?» y te dice qué está terminado, qué falta y si hay bloqueos, sin lanzar nada). Con el plugin panel-agentes, el Chat de grupo del panel le pasa los mensajes que no nombran a ningún agente, y los encargos que haces en el panel le llegan directamente («Encargo del usuario desde el panel de agentes»): los ejecuta lanzando a los agentes, sin que tengas que repetirlos en el chat principal. Con el panel instalado, cada agente publica allí sus avances y consulta a otro rol en el Chat de grupo cuando lo necesita. Si eliges el equipo de la sesión con **Configurar equipo** en el panel, el coordinador usa solo esos agentes y te propone incorporar los que falten.
 
 Los plugins no pueden traer permisos de `settings.json`. Para que Claude pida confirmación antes de push, release o `docker push` en un proyecto, copia `.claude/settings.json` de este repositorio al proyecto.
 
 **Producto y negocio** (`product-analyst`) sustituye a product-owner y business-analyst: un solo agente hace las dos partes en una entrega, ajustada al encargo (una respuesta directa para una pregunta sencilla, una definición con trazabilidad para una función compleja). Su método está en la skill `producto-negocio`, que el agente carga al empezar con el campo `skills` de su definición; la skill no aparece en el menú de comandos.
 
 **Investigaciones (Coordinador).** Desde la 0.10.0 ya no hay agente Investigación (`research-agent`): el Coordinador busca en la web, consulta las fuentes, compara y redacta el informe con sus propias herramientas de la sesión principal (WebSearch, WebFetch, Read, Grep, Glob y Write para guardar), sin lanzar ningún subagente. Cada informe distingue hallazgos verificados, suposiciones, recomendaciones y cuestiones pendientes, con las fuentes y su fecha de consulta. Se guarda en el propio proyecto, en `docs/investigaciones/` (o en una carpeta equivalente si el proyecto ya tiene una), con un `indice.md` donde cada investigación sale con su tema, fecha, estado (completa, parcial o bloqueada, con lo que falta), si es la vigente y el enlace. El Coordinador solo dice «Guardado» después de comprobar el archivo y el índice; si no puede guardar, explica por qué y te deja el informe completo. Al actualizar una investigación se crea otra versión (`-v2`…) y la anterior queda marcada como sustituida, sin borrarse. Antes de investigar mira si ya hay un informe vigente; a los especialistas les pasa la ruta y un resumen de los que les sirven, y ellos lo leen cuando necesitan el detalle. Si un especialista necesita algo investigado, se lo pregunta al Coordinador. Las recomendaciones de un informe no son requisitos: solo lo que figure en sus «Decisiones del usuario».
+
+**Equipo de cinco (0.11.0).** Para gastar menos tokens, el equipo pasó de siete a cinco agentes: cada lanzamiento arranca de cero y vuelve a leer el proyecto, así que menos traspasos es menos gasto. `ux-ui-designer` se unió a `frontend-engineer` («Diseño y Frontend»), que primero escribe el diseño breve (flujo, estados, accesibilidad) y después lo implementa. `code-reviewer` se unió a `qa-engineer` («Calidad»), que revisa el código y lo prueba en una sola pasada. Además, Producto y negocio deja los casos de prueba junto a sus criterios, así que ya no se lanza QA antes de programar. Una función con interfaz pasa de unos 7 lanzamientos a 4.
