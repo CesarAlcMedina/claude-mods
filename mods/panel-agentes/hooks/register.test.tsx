@@ -84,7 +84,7 @@ test('el modelo elegido en la tarjeta se usa al lanzar el agente', async ($, on)
       tool_use_id: 't',
       prompt: 'Revisa',
       description: 'Revisión',
-      subagentType: 'agent-control-center:code-reviewer',
+      subagentType: 'agent-control-center:qa-engineer',
       provider: PROVIDER,
       parentModel: 'test',
       background: false,
@@ -92,15 +92,15 @@ test('el modelo elegido en la tarjeta se usa al lanzar el agente', async ($, on)
     })
 
   const desk = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await desk.press({ key: 'menu-code-reviewer' })
-  await desk.select({ key: 'modelo-code-reviewer', value: 'opus' })
+  await desk.press({ key: 'menu-qa-engineer' })
+  await desk.select({ key: 'modelo-qa-engineer', value: 'opus' })
   await desk.unmount()
   await spawn()
 
   // Mobile has no Select: the card's button walks the models instead.
   const phone = await $.ui.mount({ ...PANE, surface: 'mobile' })
   expect(await phone.find({ type: 'Button', text: /Modelo: Opus/ })).toBeDefined()
-  await phone.press({ key: 'modelo-code-reviewer' })
+  await phone.press({ key: 'modelo-qa-engineer' })
   expect(await phone.find({ type: 'Button', text: /Modelo: Como el equipo/ })).toBeDefined()
   await phone.unmount()
   await spawn()
@@ -129,23 +129,23 @@ test('el chat con un agente y el de grupo', async ($, on) => {
   const picks: string[] = []
   on('model.complete', (_, e) => {
     picks.push(e.prompt)
-    return { value: { isAnswered: true as const, text: '@ux, @qa, @dev', usage } }
+    return { value: { isAnswered: true as const, text: '@devops, @qa', usage } }
   })
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'chat-qa-engineer' })
   await ui.input({ key: 'entrada-qa-engineer-0', text: '¿Qué estás haciendo?' })
-  expect(prompts[0]).toContain('eres el agente QA del')
+  expect(prompts[0]).toContain('eres el agente Calidad del')
   expect(prompts[0]).toContain('Breve por defecto')
   expect(prompts[0]).toContain('no tienes herramientas')
   expect(prompts[0]).toContain('¿Qué estás haciendo?')
-  expect(await ui.find({ type: 'Markdown', text: /Respuesta de QA/ })).toBeDefined()
+  expect(await ui.find({ type: 'Markdown', text: /Respuesta de Calidad/ })).toBeDefined()
 
   // A second message carries the chat so far, and the field starts empty.
   expect((await ui.find({ key: 'entrada-qa-engineer-1' }))?.props).toMatchObject({ value: '' })
   await ui.input({ key: 'entrada-qa-engineer-1', text: '¿Y después?' })
   expect(prompts[1]).toContain('Tú: ¿Qué estás haciendo?')
-  expect(prompts[1]).toContain('QA: Respuesta de QA.')
+  expect(prompts[1]).toContain('Calidad: Respuesta de Calidad.')
 
   // The way back is under the field too, not only at the top.
   await ui.press({ key: 'volver-abajo' })
@@ -158,7 +158,7 @@ test('el chat con un agente y el de grupo', async ($, on) => {
   expect(prompts.length).toBe(5)
   expect(prompts[2]).toContain('agente Producto y negocio')
   expect(prompts[3]).toContain('agente Backend del')
-  expect(prompts[4]).toContain('agente Frontend del')
+  expect(prompts[4]).toContain('agente Diseño y Frontend del')
   expect(prompts[2]).not.toContain('PASO')
   expect(prompts[2]).not.toContain('Lo que ya se respondió')
   expect(prompts[4]).toContain('Lo que ya se respondió a este mensaje:\n\nProducto y negocio: Respuesta de Producto y negocio.\n\nBackend: Respuesta de Backend.')
@@ -169,15 +169,15 @@ test('el chat con un agente y el de grupo', async ($, on) => {
   expect(picks.length).toBe(1)
   expect(picks[0]).toContain('Hola equipo')
   expect(prompts.length).toBe(8)
-  expect(prompts[5]).toContain('agente Diseño UX/UI')
-  expect(prompts[6]).toContain('agente QA')
+  expect(prompts[5]).toContain('agente DevOps')
+  expect(prompts[6]).toContain('agente Calidad')
   expect(prompts[5]).toContain('Aporta solo lo nuevo')
   expect(prompts[5]).not.toContain('PASO')
   expect(prompts[6]).toContain('responde solo con la palabra PASO')
-  expect(prompts[6]).toContain('Diseño UX/UI: Respuesta de Diseño UX/UI.')
+  expect(prompts[6]).toContain('DevOps: Respuesta de DevOps.')
   expect(prompts[7]).toContain('eres el Coordinador')
   expect(await ui.find({ type: 'Markdown', text: /Respuesta del Coordinador/ })).toBeDefined()
-  expect(await ui.find({ type: 'Markdown', text: /Respuesta de Diseño UX\/UI/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Markdown', text: /Respuesta de DevOps/ })).toBeUndefined()
 
   // Emptying the chat clears its lines.
   await ui.press({ key: 'vaciar' })
@@ -221,25 +221,25 @@ test('los agentes se escriben en el chat de grupo', async ($, on) => {
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('model.fork', (_, e) => {
     prompts.push(e.prompt)
-    const text = e.prompt.includes('agente Diseño UX/UI del')
+    const text = e.prompt.includes('agente DevOps del')
       ? 'Claro, le pregunto.\nAL GRUPO: @po ¿qué priorizamos?'
       : e.prompt.includes('agente Producto y negocio del')
         ? 'Primero el bloque 2.'
-        : e.prompt.includes('agente QA del')
+        : e.prompt.includes('agente Calidad del')
           ? '@dev ¿ya está?'
           : '@qa Casi, ¿y tú?'
     return { value: { isAnswered: true as const, text, usage } }
   })
 
-  // Asked in its own chat, the designer writes to the PO in the group.
+  // Asked in its own chat, DevOps writes to the PO in the group.
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.press({ key: 'chat-ux-ui-designer' })
-  await ui.input({ key: 'entrada-ux-ui-designer-0', text: 'Habla con el PO' })
+  await ui.press({ key: 'chat-devops-engineer' })
+  await ui.input({ key: 'entrada-devops-engineer-0', text: 'Habla con el PO' })
   expect(prompts[0]).toContain('«AL GRUPO:»')
   expect(await ui.find({ type: 'Markdown', text: /Le escribí al chat de grupo: «@po ¿qué priorizamos\?»/ })).toBeDefined()
   expect(await ui.find({ type: 'Markdown', text: /^AL GRUPO/ })).toBeUndefined()
   expect(prompts.length).toBe(2)
-  expect(prompts[1]).toContain('Mensaje nuevo del agente Diseño UX/UI')
+  expect(prompts[1]).toContain('Mensaje nuevo del agente DevOps')
   expect(prompts[1]).toContain('la conversación puede terminar ahí')
 
   await ui.press({ key: 'volver' })
@@ -248,15 +248,15 @@ test('los agentes se escriben en el chat de grupo', async ($, on) => {
   expect(await ui.find({ type: 'Markdown', text: /Primero el bloque 2/ })).toBeDefined()
 
   // Agents who keep naming each other stop after a few hops and answers:
-  // QA asks both engineers (@dev); Backend asks QA back, who answers once
+  // Calidad asks both engineers (@dev); Backend asks Calidad back, who answers once
   // more, and then Frontend answers, having seen all of it.
   await ui.input({ key: 'entrada-grupo-0', text: '@qa ¿cómo vas?' })
   expect(prompts.length).toBe(6)
   expect(prompts[3]).toContain('agente Backend del')
-  expect(prompts[3]).toContain('Mensaje nuevo del agente QA')
-  expect(prompts[4]).toContain('agente QA del')
+  expect(prompts[3]).toContain('Mensaje nuevo del agente Calidad')
+  expect(prompts[4]).toContain('agente Calidad del')
   expect(prompts[4]).toContain('No nombres a otros agentes')
-  expect(prompts[5]).toContain('agente Frontend del')
+  expect(prompts[5]).toContain('agente Diseño y Frontend del')
   expect(prompts[5]).toContain('Backend: @qa Casi, ¿y tú?')
   await ui.unmount()
 })
@@ -274,15 +274,15 @@ test('el Coordinador consulta solo a quien hace falta y contesta una vez', async
       ? { value: { isAnswered: false as const, reason: 'aborted' as const, usage } }
       : { value: { isAnswered: true as const, text: picked, usage } }
   })
-  // Each role brings something of its own, but Reviewer passes once QA has
+  // Each role brings something of its own, but DevOps passes once Calidad has
   // spoken, and the PO passes a thank-you from another agent.
   on('model.fork', (_, e) => {
     prompts.push(e.prompt)
     const said = (text: string) => ({ value: { isAnswered: true as const, text, usage } })
     if (e.prompt.includes('eres el Coordinador')) return said(`Síntesis ${prompts.length}.`)
-    if (e.prompt.includes('agente Revisión de código del') && e.prompt.includes('QA: ')) return said('PASO')
+    if (e.prompt.includes('agente DevOps del') && e.prompt.includes('Calidad: ')) return said('PASO')
     if (e.prompt.includes('agente Producto y negocio del') && e.prompt.includes('Gracias, queda claro')) return said('PASO')
-    if (e.prompt.includes('agente QA del') && e.prompt.includes('confirma con el PO')) return said('@po Gracias, queda claro.')
+    if (e.prompt.includes('agente Calidad del') && e.prompt.includes('confirma con el PO')) return said('@po Gracias, queda claro.')
     const role = /eres el agente ([^ ]+(?: [^ ]+){0,2}) del/.exec(e.prompt)?.[1] ?? '?'
     return said(`Aporte de ${role}.`)
   })
@@ -306,23 +306,23 @@ test('el Coordinador consulta solo a quien hace falta y contesta una vez', async
   picked = 'TIPO: otro\n@backend: el contrato de la API\n@frontend: los estados de la pantalla'
   await ui.input({ key: 'entrada-grupo-1', text: '¿Qué falta para el login?' })
   expect(prompts.length).toBe(5)
-  expect(prompts[3]).toContain('agente Frontend del')
+  expect(prompts[3]).toContain('agente Diseño y Frontend del')
   expect(prompts[3]).toContain('Backend: Aporte de Backend.')
-  expect(prompts[4]).toContain('Backend: Aporte de Backend.\n\nFrontend: Aporte de Frontend.')
+  expect(prompts[4]).toContain('Backend: Aporte de Backend.\n\nDiseño y Frontend: Aporte de Diseño y Frontend.')
 
   // Two who would say the same: the second passes and is left out.
-  picked = 'TIPO: otro\n@qa: riesgos del login\n@reviewer: riesgos del login'
+  picked = 'TIPO: otro\n@qa: riesgos del login\n@devops: riesgos del login'
   await ui.input({ key: 'entrada-grupo-2', text: '¿Qué riesgos ves?' })
   expect(prompts.length).toBe(8)
-  expect(prompts[7]).toContain('Sus aportaciones:\n\nQA: Aporte de QA.\n\nCómo respondes')
-  expect(prompts[7]).not.toContain('Revisión de código: ')
+  expect(prompts[7]).toContain('Sus aportaciones:\n\nCalidad: Aporte de Calidad.\n\nCómo respondes')
+  expect(prompts[7]).not.toContain('DevOps: ')
 
   // A direct mention still goes straight to that agent.
   await ui.input({ key: 'entrada-grupo-3', text: '@ux ¿cómo queda el botón?' })
   expect(prompts.length).toBe(9)
-  expect(prompts[8]).toContain('agente Diseño UX/UI del')
+  expect(prompts[8]).toContain('agente Diseño y Frontend del')
   expect(prompts[8]).not.toContain('El Coordinador te consulta')
-  expect(await shows(/Aporte de Diseño UX\/UI/)).toBe(true)
+  expect(await shows(/Aporte de Diseño y Frontend/)).toBe(true)
 
   // Agents still talk among themselves, and a settled exchange ends there.
   await ui.input({ key: 'entrada-grupo-4', text: '@qa confirma con el PO' })
@@ -429,8 +429,8 @@ test('el Coordinador informa del avance sin lanzar nada y lanza los encargos en 
   expect(prompts[0]).toContain('Resumen de su informe: Tres historias listas para el login.')
   expect(prompts[0]).toContain('- Backend, tarea «API del login»: iniciado, trabaja en ello ahora')
   expect(prompts[0]).toContain('Lo último que escribió: «Llevo el endpoint de callback; falta la sesión.»')
-  expect(prompts[0]).toContain('No consta ninguna entrega de QA posterior al desarrollo: nada está verificado.')
-  expect(prompts[0]).toContain('verificado (QA lo probó después del desarrollo')
+  expect(prompts[0]).toContain('No consta ninguna entrega de Calidad posterior al desarrollo: nada está verificado.')
+  expect(prompts[0]).toContain('verificado (Calidad lo revisó y probó después del desarrollo')
   expect(await shows(/Informe 1/)).toBe(true)
   expect(submits).toEqual([])
   expect(count).toBe(2)
@@ -439,11 +439,11 @@ test('el Coordinador informa del avance sin lanzar nada y lanza los encargos en 
   // panel itself, with no trip to the main chat and no Enter.
   picked = 'TIPO: encargo\n@reviewer: revisar el login'
   await ui.input({ key: 'entrada-grupo-1', text: 'Revisa el código del login' })
-  expect(await shows(/^Recibido\. Se lo encargo a Revisión de código\. Te aviso aquí cuando empiece de verdad/)).toBe(true)
+  expect(await shows(/^Recibido\. Se lo encargo a Calidad\. Te aviso aquí cuando empiece de verdad/)).toBe(true)
   await until(() => submits.length === 1)
   expect(submits[0]).toContain('Encargo del usuario desde el panel de agentes (encargo ')
   expect(submits[0]).toContain('«Revisa el código del login»')
-  expect(submits[0]).toContain('Agente: Revisión de código (agent-control-center:code-reviewer). Lánzalo ahora')
+  expect(submits[0]).toContain('Agente: Calidad (agent-control-center:qa-engineer). Lánzalo ahora')
   expect(submits[0]).toContain('sin pedirle que lo repita ni que cambie de chat')
   expect(fills).toEqual([])
   expect(prompts.length).toBe(1)
@@ -464,20 +464,20 @@ test('el Coordinador informa del avance sin lanzar nada y lanza los encargos en 
 
   // The main session launches the agent: now it has started, and says so.
   const firstEnds = await mainTurn('m1', 'Lancé a Revisión en segundo plano.')
-  await $.tool.call({ tool: 'Agent', subagent_type: 'agent-control-center:code-reviewer', description: 'Revisar el login', prompt: 'x' } as never)
+  await $.tool.call({ tool: 'Agent', subagent_type: 'agent-control-center:qa-engineer', description: 'Revisar el login', prompt: 'x' } as never)
   await ui.press({ key: 'volver-abajo' })
   expect((await ui.find({ key: 'tarjeta-coordinador' }))?.text).toContain('Coordinando')
-  expect(await ui.find({ type: 'Text', text: /^«Revisa el código del login» · lanza a Revisión de código$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^«Revisa el código del login» · lanza a Calidad$/ })).toBeDefined()
   await ui.press({ key: 'chat-coordinador' })
   await spawn('code-reviewer', 'Revisar el login')
-  expect(await shows(/^Revisión de código ya está trabajando en «Revisar el login»\.$/)).toBe(true)
+  expect(await shows(/^Calidad ya está trabajando en «Revisar el login»\.$/)).toBe(true)
   // Its turn ends while the agent works: nothing to give yet.
   await firstEnds()
   expect(await shows(/Lancé a Revisión/)).toBe(false)
   picked = 'TIPO: estado'
   await ui.input({ key: 'entrada-grupo-3', text: '¿Cómo va?' })
   expect(prompts[2]).toContain('Estado: ejecución iniciada')
-  expect(prompts[2]).toContain('- Revisión de código, tarea «Revisar el login»: iniciado')
+  expect(prompts[2]).toContain('- Calidad, tarea «Revisar el login»: iniciado')
 
   // The agent delivers in the chat it was asked in, and the main session's
   // next turn, on its hand-back, brings the result.
@@ -571,7 +571,7 @@ test('un encargo en el chat de un agente, o con @ en el grupo, llega al Coordina
     prompts.push(e.prompt)
     const said = (text: string) => ({ value: { isAnswered: true as const, text, usage } })
     if (e.prompt.includes('eres el Coordinador')) return said('Lo investigo yo.\nENCARGO: @research compara los precios de Acme y Globex y consulta a @qa qué probar')
-    if (e.prompt.includes('agente QA del')) return said('Se lo paso al Coordinador para que me lance.\nENCARGO: Prueba el login con tres usuarios')
+    if (e.prompt.includes('agente Calidad del')) return said('Se lo paso al Coordinador para que me lance.\nENCARGO: Prueba el login con tres usuarios')
     if (e.prompt.includes('agente Backend del')) return said('Eso lo investiga el Coordinador.\nENCARGO: @coordinador investiga la librería pdfkit')
     return said('Opinión del PO.')
   })
@@ -581,7 +581,7 @@ test('un encargo en el chat de un agente, o con @ en el grupo, llega al Coordina
     for (let i = 0; i < 200 && !done(); i++) await ui.find({ key: 'caja' })
   }
 
-  // In its own chat: QA hands the work on, and its line is not shown as is.
+  // In its own chat: Calidad hands the work on, and its line is not shown as is.
   await ui.press({ key: 'chat-qa-engineer' })
   await ui.input({ key: 'entrada-qa-engineer-0', text: 'Prueba el login' })
   expect(prompts[0]).toContain('añade al final una línea que empiece por «ENCARGO:»')
@@ -589,10 +589,10 @@ test('un encargo en el chat de un agente, o con @ en el grupo, llega al Coordina
   expect(prompts[0]).toContain('Nunca le digas al usuario que vaya al chat principal')
   expect(prompts[0]).not.toContain('chat principal;')
   expect(await shows(/^Se lo paso al Coordinador para que me lance\.\n\n_Se lo pasé al Coordinador como encargo: «Prueba el login con tres usuarios»_$/)).toBe(true)
-  expect(await shows(/^Recibido\. Se lo encargo a QA\./)).toBe(true)
+  expect(await shows(/^Recibido\. Se lo encargo a Calidad\./)).toBe(true)
   await until(() => submits.length === 1)
   expect(submits[0]).toContain('«Prueba el login con tres usuarios»')
-  expect(submits[0]).toContain('Agente: QA (agent-control-center:qa-engineer)')
+  expect(submits[0]).toContain('Agente: Calidad (agent-control-center:qa-engineer)')
   await $.prompt.submit({ text: submits[0] ?? '', wait: false, origin: { kind: 'plugin', name: 'panel-agentes' } })
   await $.agent.spawn({
     tool_use_id: 't',
@@ -605,7 +605,7 @@ test('un encargo en el chat de un agente, o con @ en el grupo, llega al Coordina
     fork: false,
   })
   // It started, and hears so in its own chat.
-  expect(await shows(/^QA ya está trabajando en «Probar el login»\.$/)).toBe(true)
+  expect(await shows(/^Calidad ya está trabajando en «Probar el login»\.$/)).toBe(true)
 
   // Research asked of a specialist in its chat goes to the Coordinador.
   await ui.press({ key: 'volver-abajo' })
@@ -803,9 +803,9 @@ test('al reanudar, el trabajo que cortó la pausa sigue donde se quedó', async 
   await ui.press({ key: 'pausa-todos' })
   await until(() => submits.length === 1)
   expect(submits[0]).toContain('Reanuda el trabajo que quedó en pausa')
-  expect(submits[0]).toContain('QA (agente a1), tarea «Validar bloque 2». Dónde lo dejó: Validé los casos 1 a 4; faltan del 5 al 9.')
+  expect(submits[0]).toContain('Calidad (agente a1), tarea «Validar bloque 2». Dónde lo dejó: Validé los casos 1 a 4; faltan del 5 al 9.')
   expect(fills).toEqual([])
-  expect(await ui.find({ type: 'Markdown', text: /Reanudando: QA sigue donde lo dejó/ })).toBeDefined()
+  expect(await ui.find({ type: 'Markdown', text: /Reanudando: Calidad sigue donde lo dejó/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /Listo para seguir/ })).toBeDefined()
 
   // The same agent goes on: its tools work again, and the notice goes.
@@ -877,11 +877,11 @@ test('configurar equipo: elegir, cancelar, quitar, incorporar, ocupados, vacío 
   const toggle = async (ui: { press: (target: { key: string }) => Promise<unknown> }, roles: string[]) => {
     for (const role of roles) await ui.press({ key: `casilla-${role}` })
   }
-  const OTHERS = ['ux-ui-designer', 'backend-engineer', 'frontend-engineer', 'code-reviewer', 'devops-engineer']
+  const OTHERS = ['backend-engineer', 'frontend-engineer', 'devops-engineer']
 
   // With no team chosen, everyone takes part, as before.
   let ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await ui.find({ type: 'Text', text: /el Coordinador y los 7 especialistas \(sin configurar\)/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /el Coordinador y los 5 especialistas \(sin configurar\)/ })).toBeDefined()
   expect(await ui.find({ key: 'tarjeta-coordinador' })).toBeDefined()
   expect(await ui.find({ key: 'tarjeta-research-agent' })).toBeUndefined()
   expect(await ui.find({ key: 'tarjeta-devops-engineer' })).toBeDefined()
@@ -890,14 +890,14 @@ test('configurar equipo: elegir, cancelar, quitar, incorporar, ocupados, vacío 
 
   // Cancelling leaves the team as it was.
   await ui.press({ key: 'configurar-equipo' })
-  expect(await ui.find({ type: 'Text', text: /7 de 7 especialistas seleccionados/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /5 de 5 especialistas seleccionados/ })).toBeDefined()
   // The Coordinador is in every team, with no box of its own; Investigación is gone.
   expect(await ui.find({ type: 'Text', text: /El Coordinador participa siempre/ })).toBeDefined()
   expect(await ui.find({ key: 'casilla-coordinador' })).toBeUndefined()
   expect(await ui.find({ key: 'casilla-research-agent' })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /reglas de negocio y criterios de aceptación verificables/ })).toBeDefined()
   await toggle(ui, OTHERS)
-  expect(await ui.find({ type: 'Text', text: /2 de 7 especialistas seleccionados/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /2 de 5 especialistas seleccionados/ })).toBeDefined()
   await ui.press({ key: 'cancelar-equipo' })
   expect(await ui.find({ type: 'Text', text: /sin configurar/ })).toBeDefined()
   expect(await ui.find({ key: 'tarjeta-devops-engineer' })).toBeDefined()
@@ -906,7 +906,7 @@ test('configurar equipo: elegir, cancelar, quitar, incorporar, ocupados, vacío 
   await ui.press({ key: 'configurar-equipo' })
   await toggle(ui, OTHERS)
   await ui.press({ key: 'confirmar-equipo' })
-  expect(await ui.find({ type: 'Text', text: /el Coordinador y 2 de 7 especialistas/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /el Coordinador y 2 de 5 especialistas/ })).toBeDefined()
   expect(await ui.find({ key: 'tarjeta-qa-engineer' })).toBeDefined()
   expect(await ui.find({ key: 'tarjeta-devops-engineer' })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^Todos/ })).toBeDefined()
@@ -914,29 +914,29 @@ test('configurar equipo: elegir, cancelar, quitar, incorporar, ocupados, vacío 
   expect(await spawn('qa-engineer')).toMatchObject({ agentId: 'a1' })
   // The main session hears of the team once, with its next prompt.
   await submit()
-  expect(contexts.at(-1)?.join(' ')).toContain('Equipo activo de esta sesión, elegido por el usuario en el panel de agentes: Producto y negocio y QA.')
+  expect(contexts.at(-1)?.join(' ')).toContain('Equipo activo de esta sesión, elegido por el usuario en el panel de agentes: Producto y negocio y Calidad.')
   await submit()
   expect(contexts.at(-1)).toBeUndefined()
 
   // Reopening the panel keeps the team.
   await ui.unmount()
   ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await ui.find({ type: 'Text', text: /el Coordinador y 2 de 7 especialistas/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /el Coordinador y 2 de 5 especialistas/ })).toBeDefined()
 
   // Taking off a working agent asks first, and never cuts its task.
   await ui.press({ key: 'configurar-equipo' })
-  expect(await ui.find({ type: 'Text', text: /QA · trabajando/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Calidad · trabajando/ })).toBeDefined()
   await toggle(ui, ['qa-engineer'])
   await ui.press({ key: 'confirmar-equipo' })
-  expect(await ui.find({ type: 'Text', text: /QA está trabajando ahora y su tarea no se cancela/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Calidad está trabajando ahora y su tarea no se cancela/ })).toBeDefined()
   await ui.press({ key: 'retirar-al-terminar' })
   expect(await ui.find({ type: 'Text', text: /Se retira al terminar/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /el Coordinador y 1 de 7 especialistas/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /el Coordinador y 1 de 5 especialistas/ })).toBeDefined()
   const fromQa = { tool: 'Read', file_path: '/a.md', agentId: 'a1' } as const
   expect(await $.tool.call(fromQa)).toMatchObject({ result: {} })
-  expect(await spawn('qa-engineer')).toMatchObject({ deny: expect.stringContaining('QA no está en el equipo') })
+  expect(await spawn('qa-engineer')).toMatchObject({ deny: expect.stringContaining('Calidad no está en el equipo') })
   await submit()
-  expect(contexts.at(-1)?.join(' ')).toContain('QA sale del equipo: termina lo que tiene y no le des trabajo nuevo.')
+  expect(contexts.at(-1)?.join(' ')).toContain('Calidad sale del equipo: termina lo que tiene y no le des trabajo nuevo.')
   await $.turn.complete({ answer: 'Plan listo.', durationMs: 1000, isAborted: false, turnId: 'u', agentId: 'a1', reason: 'answer' })
   expect(await ui.find({ key: 'tarjeta-qa-engineer' })).toBeUndefined()
   // Its delivery stays.
@@ -948,15 +948,15 @@ test('configurar equipo: elegir, cancelar, quitar, incorporar, ocupados, vacío 
   await toggle(ui, ['devops-engineer', 'product-analyst'])
   await ui.press({ key: 'confirmar-equipo' })
   await ui.press({ key: 'mantener-ocupados' })
-  expect(await ui.find({ type: 'Text', text: /el Coordinador y 2 de 7 especialistas/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /el Coordinador y 2 de 5 especialistas/ })).toBeDefined()
   expect(await ui.find({ key: 'tarjeta-product-analyst' })).toBeDefined()
   expect(await spawn('devops-engineer')).toMatchObject({ agentId: 'a3' })
   await submit()
   expect(contexts.at(-1)?.join(' ')).toContain('DevOps se acaba de incorporar')
   await ui.press({ key: 'chat-grupo' })
-  expect(await ui.find({ type: 'Text', text: /Equipo de esta sesión: Producto y negocio y QA\./ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /QA sale del equipo al terminar su tarea\./ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /QA terminó su tarea y salió del equipo\./ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Equipo de esta sesión: Producto y negocio y Calidad\./ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Calidad sale del equipo al terminar su tarea\./ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Calidad terminó su tarea y salió del equipo\./ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /DevOps se incorporó al equipo\./ })).toBeDefined()
   await ui.press({ key: 'volver' })
 
@@ -973,7 +973,7 @@ test('configurar equipo: elegir, cancelar, quitar, incorporar, ocupados, vacío 
   // A resumed agent finishes what it had, team or not.
   expect(await spawn('devops-engineer', 'a3')).toMatchObject({ agentId: 'a3' })
   await ui.press({ key: 'configurar-equipo-vacio' })
-  expect(await ui.find({ type: 'Text', text: /0 de 7 especialistas seleccionados/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /0 de 5 especialistas seleccionados/ })).toBeDefined()
   await ui.press({ key: 'cancelar-equipo' })
   await ui.unmount()
 })
@@ -984,7 +984,7 @@ test('solo el equipo participa en los chats, y a un agente fuera se le ofrece in
   const submits: string[] = []
   const usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
   let picked = ''
-  let qaSays = 'Respuesta de QA.'
+  let qaSays = 'Respuesta de Calidad.'
   let count = 0
   mock.store(on)
   on('ui.open', () => ({ value: { isPlaced: true } }))
@@ -1001,7 +1001,7 @@ test('solo el equipo participa en los chats, y a un agente fuera se le ofrece in
   on('model.fork', (_, e) => {
     prompts.push(e.prompt)
     if (e.prompt.includes('eres el Coordinador')) return { value: { isAnswered: true as const, text: 'Respuesta del Coordinador.', usage } }
-    if (e.prompt.includes('agente QA del')) return { value: { isAnswered: true as const, text: qaSays, usage } }
+    if (e.prompt.includes('agente Calidad del')) return { value: { isAnswered: true as const, text: qaSays, usage } }
     const role = /eres el agente ([^ ]+(?: [^ ]+){0,2}) del/.exec(e.prompt)?.[1] ?? '?'
     return { value: { isAnswered: true as const, text: `Respuesta de ${role}.`, usage } }
   })
@@ -1024,7 +1024,7 @@ test('solo el equipo participa en los chats, y a un agente fuera se le ofrece in
   // The team: PO and QA.
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'configurar-equipo' })
-  for (const role of ['ux-ui-designer', 'backend-engineer', 'frontend-engineer', 'code-reviewer', 'devops-engineer']) {
+  for (const role of ['backend-engineer', 'frontend-engineer', 'devops-engineer']) {
     await ui.press({ key: `casilla-${role}` })
   }
   await ui.press({ key: 'confirmar-equipo' })
@@ -1033,18 +1033,18 @@ test('solo el equipo participa en los chats, y a un agente fuera se le ofrece in
   // The pick sees only the team; one it names out of it is proposed, not consulted.
   picked = 'TIPO: otro\n@qa: riesgos de la prueba\n@devops: el pipeline'
   await ui.input({ key: 'entrada-grupo-0', text: '¿Qué riesgos ves para sacar el login?' })
-  expect(picks.at(-1)).toContain('@qa: QA')
+  expect(picks.at(-1)).toContain('@calidad: Calidad')
   // The Coordinador is always there to pick, for research.
   expect(picks.at(-1)).toContain('@coordinador: Coordinador, la sesión principal')
   expect(picks.at(-1)).toContain('Una investigación (buscar información, consultar documentación o fuentes, comparar opciones, redactar un informe) es siempre del Coordinador')
-  expect(picks.at(-1)).not.toContain('@ux: Diseño UX/UI')
+  expect(picks.at(-1)).not.toContain('@frontend: Diseño y Frontend')
   expect(picks.at(-1)).toContain('Fuera del equipo de esta sesión')
   expect(picks.at(-1)).toContain('@devops (DevOps)')
-  expect(asked('QA').length).toBe(1)
-  expect(asked('QA')[0]).toContain('Producto y negocio (@producto), QA (@qa)')
-  expect(asked('QA')[0]).not.toContain('DevOps (@devops)')
+  expect(asked('Calidad').length).toBe(1)
+  expect(asked('Calidad')[0]).toContain('Producto y negocio (@producto), Calidad (@calidad)')
+  expect(asked('Calidad')[0]).not.toContain('DevOps (@devops)')
   expect(asked('DevOps').length).toBe(0)
-  expect(coordinator()).toContain('Equipo activo de esta sesión, elegido por el usuario: Producto y negocio y QA.')
+  expect(coordinator()).toContain('Equipo activo de esta sesión, elegido por el usuario: Producto y negocio y Calidad.')
   expect(coordinator()).toContain('haría falta DevOps, que no está en el equipo activo')
   expect(await ui.find({ type: 'Text', text: /DevOps no está en el equipo de esta sesión/ })).toBeDefined()
   await ui.press({ key: 'no-incorporar' })
@@ -1079,19 +1079,19 @@ test('solo el equipo participa en los chats, y a un agente fuera se le ofrece in
   // An agent naming one out of the team: offered, not asked.
   qaSays = '@ux ¿el botón de Google va arriba?'
   await ui.input({ key: 'entrada-grupo-4', text: '@qa ¿qué pruebas primero?' })
-  expect(asked('Diseño UX/UI').length).toBe(0)
-  expect(await ui.find({ type: 'Text', text: /Diseño UX\/UI no está en el equipo de esta sesión\. ¿Lo incorporo y le paso el mensaje\?/ })).toBeDefined()
+  expect(asked('Diseño y Frontend').length).toBe(0)
+  expect(await ui.find({ type: 'Text', text: /Diseño y Frontend no está en el equipo de esta sesión\. ¿Lo incorporo y le paso el mensaje\?/ })).toBeDefined()
   await ui.press({ key: 'no-incorporar' })
 
   // From its own chat, a line for the group naming one out of the team: the same.
-  qaSays = 'Lo consulto.\nAL GRUPO: @reviewer ¿revisaste el callback?'
+  qaSays = 'Lo consulto.\nAL GRUPO: @backend ¿revisaste el callback?'
   await ui.press({ key: 'volver' })
   await ui.press({ key: 'chat-qa-engineer' })
-  await ui.input({ key: 'entrada-qa-engineer-0', text: 'Pregúntale a revisión' })
-  expect(asked('Revisión de código').length).toBe(0)
+  await ui.input({ key: 'entrada-qa-engineer-0', text: 'Pregúntale a backend' })
+  expect(asked('Backend').length).toBe(0)
   await ui.press({ key: 'volver' })
   await ui.press({ key: 'chat-grupo' })
-  expect(await ui.find({ type: 'Text', text: /Revisión de código no está en el equipo/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Backend no está en el equipo/ })).toBeDefined()
 
   const until = async (done: () => boolean) => {
     for (let i = 0; i < 200 && !done(); i++) await ui.find({ key: 'caja' })
@@ -1101,24 +1101,24 @@ test('solo el equipo participa en los chats, y a un agente fuera se le ofrece in
   picked = 'TIPO: funcion'
   await ui.input({ key: 'entrada-grupo-5', text: 'Quiero exportar a PDF' })
   await until(() => submits.length === 1)
-  expect(submits.at(-1)).toContain('Equipo activo de esta sesión: Producto y negocio, QA y DevOps. Usa solo esos agentes')
-  expect(await ui.find({ type: 'Markdown', text: /Lo llevo al flujo con el equipo de esta sesión \(Producto y negocio, QA y DevOps\)/ })).toBeDefined()
+  expect(submits.at(-1)).toContain('Equipo activo de esta sesión: Producto y negocio, Calidad y DevOps. Usa solo esos agentes')
+  expect(await ui.find({ type: 'Markdown', text: /Lo llevo al flujo con el equipo de esta sesión \(Producto y negocio, Calidad y DevOps\)/ })).toBeDefined()
 
   // Work only one out of the team can do: offered first, then launched.
-  picked = 'TIPO: encargo\n@reviewer: revisar el exportador'
+  picked = 'TIPO: encargo\n@backend: revisar el exportador'
   await ui.input({ key: 'entrada-grupo-6', text: 'Revisa el exportador' })
   expect(submits.length).toBe(1)
-  expect(await ui.find({ type: 'Markdown', text: /Esto le toca a Revisión de código, que no está en el equipo de esta sesión/ })).toBeDefined()
+  expect(await ui.find({ type: 'Markdown', text: /Esto le toca a Backend, que no está en el equipo de esta sesión/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /¿Lo incorporo y le paso el encargo\?/ })).toBeDefined()
   await ui.press({ key: 'incorporar' })
   await until(() => submits.length === 2)
   expect(submits.at(-1)).toContain('«Revisa el exportador»')
-  expect(submits.at(-1)).toContain('Agente: Revisión de código (agent-control-center:code-reviewer)')
+  expect(submits.at(-1)).toContain('Agente: Backend (agent-control-center:backend-engineer)')
 
   // With no one in the team, the Coordinador answers alone and hands nothing on.
   await ui.press({ key: 'volver' })
   await ui.press({ key: 'configurar-equipo' })
-  for (const role of ['product-analyst', 'qa-engineer', 'devops-engineer', 'code-reviewer']) await ui.press({ key: `casilla-${role}` })
+  for (const role of ['product-analyst', 'qa-engineer', 'devops-engineer', 'backend-engineer']) await ui.press({ key: `casilla-${role}` })
   await ui.press({ key: 'confirmar-equipo' })
   await ui.press({ key: 'chat-grupo' })
   const consulted = prompts.filter(one => one.includes('eres el agente')).length
@@ -1293,19 +1293,19 @@ test('los agentes publican avances y se consultan entre ellos en el chat', async
   // What it does shows on its own, a quiet line at most every 20 s.
   await $.tool.call({ tool: 'WebSearch', query: 'navegadores más usados 2026', agentId: 'a1' } as never)
   await $.tool.call({ tool: 'WebFetch', url: 'https://example.com/a', prompt: 'x', agentId: 'a1' } as never)
-  expect(await ui.find({ type: 'Text', text: /^QA busca en la web «navegadores más usados 2026»…$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Calidad busca en la web «navegadores más usados 2026»…$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /lee example\.com/ })).toBeUndefined()
 
   // The agent at work posts its progress in the chat it was asked in.
   expect(await tool({ tool: 'mcp__panel-agentes__avance', texto: 'Reviso las analíticas del último mes.', agentId: 'a1' })).toMatchObject({ result: 'Publicado en el panel.' })
   expect(await shows(/^Reviso las analíticas del último mes\.$/)).toBe(true)
-  expect(await ui.find({ type: 'Text', text: /^QA$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Calidad$/ })).toBeDefined()
 
   // It asks Producto y negocio in the group chat; it answers there, and the agent gets it.
   const asked = await tool({ tool: 'mcp__panel-agentes__consultar', agente: 'producto', pregunta: '¿En qué navegadores probamos?', agentId: 'a1' })
   expect(asked).toMatchObject({ result: 'Producto y negocio contesta: Chrome y Firefox, los dos.' })
   expect(prompts.at(-1)).toContain('eres el agente Producto y negocio del')
-  expect(prompts.at(-1)).toContain('Mensaje nuevo del agente QA')
+  expect(prompts.at(-1)).toContain('Mensaje nuevo del agente Calidad')
   expect(prompts.at(-1)).toContain('@producto ¿En qué navegadores probamos?')
   expect(await shows(/^@producto ¿En qué navegadores probamos\?$/)).toBe(true)
   expect(await shows(/^Chrome y Firefox, los dos\.$/)).toBe(true)
@@ -1440,14 +1440,14 @@ test('Producto y negocio une al PO y al BA sin perder el equipo, los chats ni el
   expect(await ui.find({ key: 'tarjeta-product-analyst' })).toBeDefined()
   expect(await ui.find({ key: 'tarjeta-product-owner' })).toBeUndefined()
   expect(await ui.find({ key: 'tarjeta-business-analyst' })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /Equipo de esta sesión: el Coordinador y 2 de 7 especialistas/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Equipo de esta sesión: el Coordinador y 2 de 5 especialistas/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /Criterios del login/ })).toBeDefined()
   await $.turn.complete({ answer: 'Criterios listos.', durationMs: 1000, isAborted: false, turnId: 'u', agentId: 'a0', reason: 'answer' })
   expect(await ui.find({ type: 'Text', text: /Producto y negocio · 1 s/ })).toBeDefined()
 
   // The main session hears the team under its new name, with no one new in it.
   await $.prompt.submit({ text: 'sigue', wait: false, origin: { kind: 'composer' } })
-  expect(contexts.at(-1)?.join(' ')).toContain('Equipo activo de esta sesión, elegido por el usuario en el panel de agentes: Producto y negocio y QA.')
+  expect(contexts.at(-1)?.join(' ')).toContain('Equipo activo de esta sesión, elegido por el usuario en el panel de agentes: Producto y negocio y Calidad.')
   expect(contexts.at(-1)?.join(' ')).not.toContain('se acaba de incorporar')
   // The model chosen for the PO is now the one of Producto y negocio.
   await spawn('product-analyst')
@@ -1492,6 +1492,98 @@ test('Producto y negocio une al PO y al BA sin perder el equipo, los chats ni el
     result?: unknown
   }
   expect(String(reply.result)).toContain('Producto y negocio contesta')
+  await ui.unmount()
+})
+
+test('Diseño y Frontend une a UX y Frontend, y Calidad a Revisión y QA, sin perder el equipo, los chats ni el trabajo en curso', async ($, on) => {
+  const usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
+  const prompts: string[] = []
+  const models: (string | undefined)[] = []
+  let count = 0
+  mock.store(on, { modelos: { 'ux-ui-designer': 'opus', 'code-reviewer': 'haiku' } })
+  const seeds = new Map<string, unknown>(
+    Object.entries({
+      team: {
+        roles: ['ux-ui-designer', 'frontend-engineer', 'code-reviewer', 'qa-engineer'],
+        leaving: [],
+        joined: {},
+        isChosen: true,
+        told: 'code-reviewer,frontend-engineer,qa-engineer,ux-ui-designer|',
+      },
+      chat: [
+        { id: 'm1', channel: 'ux-ui-designer', from: 'tu', text: '¿Dónde va el botón?' },
+        { id: 'm2', channel: 'ux-ui-designer', from: 'ux-ui-designer', text: 'Arriba a la derecha.' },
+      ],
+      runs: [{ id: 'a0', role: 'code-reviewer', task: 'Revisar el login', status: 'trabajando', tools: 0, startedAt: 1 }],
+    }),
+  )
+  let team: { roles: string[] } | undefined
+  on('state.get', (_, e, next) => (seeds.has(e.key) ? { value: { value: seeds.get(e.key), version: 0 } } : next(e)))
+  on('state.set', (_, e, next) => {
+    seeds.delete(e.key)
+    if (e.key === 'team') team = e.value as typeof team
+    return next(e)
+  })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: undefined as never, rateLimits: [] } }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('tool.register', (_, e) => ({ value: { name: e.name } as never }))
+  on('clock.every', () => new Promise(() => undefined))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('agent.spawn', (_, e) => {
+    models.push(e.model)
+    return { model: 'test', agentId: `a${++count}` }
+  })
+  on('tool.call', () => ({ result: {} }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('model.fork', (_, e) => {
+    prompts.push(e.prompt)
+    const role = /eres el agente ([^ ]+(?: [^ ]+){0,2}) del/.exec(e.prompt)?.[1] ?? '?'
+    return { value: { isAnswered: true as const, text: `Respuesta de ${role}.`, usage } }
+  })
+  const spawn = (role: string) =>
+    $.agent.spawn({
+      tool_use_id: 't',
+      prompt: 'Trabaja',
+      description: `Tarea de ${role}`,
+      subagentType: `agent-control-center:${role}`,
+      provider: PROVIDER,
+      parentModel: 'test',
+      background: false,
+      fork: false,
+    })
+
+  // The team keeps each merged role once, and the review at work goes on as Calidad's.
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(team?.roles).toEqual(['frontend-engineer', 'qa-engineer'])
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ key: 'tarjeta-ux-ui-designer' })).toBeUndefined()
+  expect(await ui.find({ key: 'tarjeta-code-reviewer' })).toBeUndefined()
+  expect(await ui.find({ key: 'tarjeta-frontend-engineer' })).toBeDefined()
+  expect(await ui.find({ key: 'tarjeta-qa-engineer' })).toBeDefined()
+  await $.turn.complete({ answer: 'Sin hallazgos.', durationMs: 1000, isAborted: false, turnId: 'u', agentId: 'a0', reason: 'answer' })
+  expect(await ui.find({ type: 'Text', text: /Calidad · 1 s/ })).toBeDefined()
+
+  // The models chosen for the old roles carry over.
+  await spawn('frontend-engineer')
+  expect(models.at(-1)).toBe('opus')
+  await spawn('qa-engineer')
+  expect(models.at(-1)).toBe('haiku')
+
+  // The designer's chat is now in Diseño y Frontend's, with who wrote each message.
+  await ui.press({ key: 'chat-frontend-engineer' })
+  expect(await ui.find({ type: 'Markdown', text: /^Arriba a la derecha\.$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Diseño UX\/UI$/ })).toBeDefined()
+  await ui.press({ key: 'volver' })
+
+  // Old and new names reach each merged role once.
+  await ui.press({ key: 'chat-grupo' })
+  const before = prompts.length
+  await ui.input({ key: 'entrada-grupo-0', text: '@ux @frontend @reviewer @qa ¿qué falta?' })
+  const asked = prompts.slice(before)
+  expect(asked.length).toBe(2)
+  expect(asked.filter(one => one.includes('eres el agente Diseño y Frontend del')).length).toBe(1)
+  expect(asked.filter(one => one.includes('eres el agente Calidad del')).length).toBe(1)
   await ui.unmount()
 })
 
@@ -1549,7 +1641,7 @@ test('Investigación pasa al Coordinador: su historial queda, su trabajo en curs
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   const coordinator = async () => (await ui.find({ key: 'tarjeta-coordinador' }))?.text ?? ''
   expect(await ui.find({ key: 'tarjeta-research-agent' })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /el Coordinador y 1 de 7 especialistas/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /el Coordinador y 1 de 5 especialistas/ })).toBeDefined()
   expect(await coordinator()).toContain('Esperando entregas')
   expect(await ui.find({ type: 'Text', text: /^Espera a Investigación$/ })).toBeDefined()
 
